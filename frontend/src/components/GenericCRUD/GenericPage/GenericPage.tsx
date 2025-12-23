@@ -99,6 +99,7 @@ export function GenericPage<TData extends { id?: string | number }, TCreate, TUp
         onClearFormError?.()
         const initial =
             config.form.getUpdateInitialValues?.(record) ?? (record as unknown as Partial<TUpdate>)
+        console.log('initial values for edit modal', initial)
         form.setFieldsValue(initial)
         setIsModalVisible(true)
     }, [config.form, form, onClearFormError])

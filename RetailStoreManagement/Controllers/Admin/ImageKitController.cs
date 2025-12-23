@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Net.Http.Headers;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
@@ -64,6 +65,45 @@ public class ImageKitController : ControllerBase
         {
             return StatusCode(500, ApiResponse<object>.Error($"Error generating ImageKit auth: {ex.Message}", 500));
         }
+    }
+
+    /// <summary>
+    /// Xóa file trên ImageKit theo fileId.
+    /// </summary>
+    [HttpDelete("file/{fileId}")]
+    public async Task<IActionResult> DeleteFile([FromRoute] string fileId)
+    {
+        if (string.IsNullOrWhiteSpace(fileId))
+        {
+            return BadRequest(ApiResponse<object>.Error("fileId is required", 400));
+        }
+
+        var privateKey = _configuration["ImageKit:PrivateKey"];
+        if (string.IsNullOrEmpty(privateKey))
+        {
+            return StatusCode(500, ApiResponse<object>.Error(
+                "ImageKit configuration is missing. Please configure ImageKit:PrivateKey in appsettings.json",
+                500
+            ));
+        }
+
+        var requestUrl = $"https://api.imagekit.io/v1/files/{fileId}";
+        using var httpClient = new HttpClient();
+        var authToken = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{privateKey}:"));
+        httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", authToken);
+        httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+        var response = await httpClient.DeleteAsync(requestUrl);
+        if (response.IsSuccessStatusCode)
+        {
+            // 204 No Content expected
+            return Ok(ApiResponse<object>.Success(new { }, "File deleted"));
+        }
+
+        var content = await response.Content.ReadAsStringAsync();
+        var statusCode = (int)response.StatusCode;
+        var message = string.IsNullOrWhiteSpace(content) ? "Failed to delete ImageKit file" : content;
+        return StatusCode(statusCode, ApiResponse<object>.Error(message, statusCode));
     }
 
     private static string GenerateSignature(string token, string expire, string privateKey)

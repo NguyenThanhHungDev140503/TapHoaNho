@@ -64,7 +64,8 @@ export function PromotionManagementPage() {
                 onClearPageError={clearPageError}
                 formErrorMessage={formErrorMessage}
                 onClearFormError={clearFormError}
-                renderHeader={() => <PromotionHeader promotions={promotions} />}
+                // renderHeader={() => <PromotionHeader promotions={promotions} />}
+                headerSlot={<PromotionHeader promotions={promotions} />}
                 statisticsSlot={
                     <PromotionStatistics
                         totalPromotions={total}

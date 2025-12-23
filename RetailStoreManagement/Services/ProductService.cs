@@ -77,13 +77,17 @@ public class ProductService : IProductService
                 .Select(p => new ProductListDto
                 {
                     Id = p.Id,
+                    CategoryId = p.CategoryId,
+                    SupplierId = p.SupplierId,
                     ProductName = p.ProductName,
                     Barcode = p.Barcode ?? string.Empty,
                     Price = p.Price,
                     Unit = p.Unit ?? string.Empty,
                     CategoryName = p.Category != null ? p.Category.CategoryName : string.Empty,
                     SupplierName = p.Supplier != null ? p.Supplier.Name : string.Empty,
-                    InventoryQuantity = p.Inventory != null ? p.Inventory.Quantity : 0
+                    InventoryQuantity = p.Inventory != null ? p.Inventory.Quantity : 0,
+                    ImageUrl = p.ImageUrl,
+                    ImageFileId = p.ImageFileId
                 });
 
             // Use the new CreateAsync method for pagination
