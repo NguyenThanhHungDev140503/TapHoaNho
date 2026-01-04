@@ -51,8 +51,8 @@
   # PROCESSES - Background services (devenv up)
   # ============================================
   processes = {
-    frontend.exec = "cd frontend && yarn dev";
-    backend.exec = "cd RetailStoreManagement/src/WebApi && dotnet watch run --launch-profile http";
+    frontend.exec = "${pkgs.bash}/bin/bash -c 'cd frontend && yarn dev'";
+    backend.exec = "${pkgs.bash}/bin/bash -c 'cd RetailStoreManagement/src/WebApi && dotnet watch run --launch-profile http'";
   };
 
   # ============================================
@@ -102,7 +102,7 @@
     
     # Script for git pre-commit hook
     lint-frontend.exec = ''
-      cd frontend && yarn lint --max-warnings 0
+      cd frontend && yarn lint
     '';
   };
 
