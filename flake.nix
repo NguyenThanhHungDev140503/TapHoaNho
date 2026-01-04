@@ -1,88 +1,44 @@
 {
-  description = "Môi trường phát triển cho Retail Store Management System";
+  description = "TapHoaNho - Retail Store Management System";
 
+  # ============================================
+  # INPUTS
+  # ============================================
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";  # Dùng unstable để có .NET 9.0
-    flake-utils.url = "github:numtide/flake-utils";
+    nixpkgs.url = "github:cachix/devenv-nixpkgs/rolling";
+    devenv.url = "github:cachix/devenv";
+    flake-parts.url = "github:hercules-ci/flake-parts";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        pkgs = import nixpkgs {
-          inherit system;
-        };
+  nixConfig = {
+    extra-trusted-public-keys = "devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=";
+    extra-substituters = "https://devenv.cachix.org";
+  };
 
-        # Node.js version - sử dụng LTS 20
-        nodejs = pkgs.nodejs_20;
+  # ============================================
+  # OUTPUTS
+  # ============================================
+  outputs = inputs@{ flake-parts, nixpkgs, ... }:
+    flake-parts.lib.mkFlake { inherit inputs; } {
+      imports = [ inputs.devenv.flakeModule ];
+      
+      systems = nixpkgs.lib.systems.flakeExposed;
 
-        # .NET 9.0 SDK
-        dotnet-sdk = pkgs.dotnet-sdk_9;
+      perSystem = { config, self', inputs', pkgs, system, ... }: {
+        # ----------------------------------------
+        # Packages
+        # ----------------------------------------
+        packages.default = pkgs.hello;
+        
+        # ----------------------------------------
+        # Formatter
+        # ----------------------------------------
+        formatter = pkgs.nixfmt-rfc-style;
 
-        # PostgreSQL 16
-        postgresql = pkgs.postgresql_16;
-
-        # Yarn - sử dụng yarn-berry (yarn 4.x)
-        yarn = pkgs.yarn-berry;
-
-        # Các công cụ phát triển
-        devTools = with pkgs; [
-          # Công cụ cơ bản (tr, grep, sed, head, v.v.)
-          coreutils
-          git
-          curl
-          jq
-          # Công cụ để quản lý database
-          postgresql
-          # Công cụ để build .NET
-          dotnet-sdk
-          # Node.js và package manager
-          nodejs
-          yarn
-          # TypeScript compiler (có thể cần global)
-          nodePackages.typescript
-          # ESLint (có thể cần global)
-          nodePackages.eslint
-        ];
-      in
-      {
-        devShells.default = pkgs.mkShell {
-          buildInputs = devTools;
-
-          shellHook = ''
-            # Đặt PATH từ Nix TRƯỚC mọi thứ khác để đảm bảo ưu tiên tuyệt đối
-            export PATH="${pkgs.lib.makeBinPath devTools}:$PATH"
-            
-            # Disable Corepack để tránh xung đột với yarn từ nix
-            export COREPACK_ENABLE_STRICT=0
-            # Xóa corepack khỏi hash table nếu có
-            hash -d corepack 2>/dev/null || true
-            
-            echo "🚀 Retail Store Management System - Development Environment"
-            echo "=================================================="
-            echo ""
-            echo "📦 Công cụ đã cài đặt:"
-            echo "  • Node.js: $(node --version 2>/dev/null || echo 'N/A')"
-            echo "  • Yarn: $(yarn --version 2>/dev/null || echo 'N/A')"
-            echo "  • .NET SDK: $(dotnet --version 2>/dev/null || echo 'N/A')"
-            echo "  • PostgreSQL: $(psql --version 2>/dev/null | head -n1 || echo '16.x (installed)')"
-            echo ""
-            echo "📁 Cấu trúc dự án:"
-            echo "  • Frontend: ./frontend"
-            echo "  • Backend: ./RetailStoreManagement"
-            echo ""
-            echo "🔧 Lệnh hữu ích:"
-            echo "  • Frontend dev: cd frontend && yarn dev"
-            echo "  • Backend dev: cd RetailStoreManagement && dotnet run"
-            echo "  • Restore packages: cd frontend && yarn install"
-            echo "  • Restore .NET: cd RetailStoreManagement && dotnet restore"
-            echo ""
-          '';
-
-          # Biến môi trường
-          DOTNET_ROOT = "${dotnet-sdk}";
-          # PATH được set trong shellHook để đảm bảo ưu tiên
-        };
-      });
+        # ----------------------------------------
+        # Devenv Shell - Import from devenv.nix
+        # ----------------------------------------
+        devenv.shells.default = import ./devenv.nix { inherit pkgs; };
+      };
+    };
 }
-
