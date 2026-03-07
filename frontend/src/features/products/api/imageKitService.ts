@@ -99,6 +99,14 @@ export async function getImageKitAuth(): Promise<ImageKitAuthParams> {
 }
 
 /**
+ * Xóa file trên ImageKit thông qua backend (dùng private key trên server).
+ */
+export async function deleteImageKitFile(fileId: string): Promise<void> {
+  if (!fileId) return;
+  await axiosClient.delete(`/api/admin/imagekit/file/${fileId}`);
+}
+
+/**
  * Upload ảnh lên ImageKit
  * @param file - File object từ input
  * @param fileName - Tên file (optional, mặc định dùng file.name)

@@ -74,7 +74,6 @@ const authModuleRoutes: ModuleRoutes<any>[] = [
 ];
 
 
-
 // Admin routes (có sidebar)
 const adminModuleRoutes: ModuleRoutes<any>[] = [
   productsRoutes,

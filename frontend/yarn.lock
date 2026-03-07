@@ -867,6 +867,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@imagekit/javascript@npm:^5.1.0":
+  version: 5.1.0
+  resolution: "@imagekit/javascript@npm:5.1.0"
+  checksum: 10c0/9a3eeeaf2fe0538b979c4713fdf8f4becad784f081da90794a9bcd3300894d6be1d6f40f367ac131c242aac7532c5633216936385b51f43a93e433254f3862f9
+  languageName: node
+  linkType: hard
+
 "@isaacs/balanced-match@npm:^4.0.1":
   version: 4.0.1
   resolution: "@isaacs/balanced-match@npm:4.0.1"
@@ -4838,15 +4845,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"react-hook-form@npm:^7.65.0":
-  version: 7.65.0
-  resolution: "react-hook-form@npm:7.65.0"
-  peerDependencies:
-    react: ^16.8.0 || ^17 || ^18 || ^19
-  checksum: 10c0/119afeaf33510d1ed6c12109f03d22d9e88f9eb01b8e4fb3cd8f40d5fc113cbcfc6154789d1d143151de8119bd08ffc7214d504e0e550ea28a9051ed6a30ae28
-  languageName: node
-  linkType: hard
-
 "react-is@npm:^18.2.0":
   version: 18.3.1
   resolution: "react-is@npm:18.3.1"
@@ -5538,6 +5536,7 @@ __metadata:
     "@ant-design/icons": "npm:^6.1.0"
     "@eslint/js": "npm:^9.36.0"
     "@hookform/resolvers": "npm:^5.2.2"
+    "@imagekit/javascript": "npm:^5.1.0"
     "@tailwindcss/typography": "npm:^0.5.19"
     "@tailwindcss/vite": "npm:^4.1.14"
     "@tanstack/react-query": "npm:^5.90.12"
@@ -5563,7 +5562,6 @@ __metadata:
     pdfmake: "npm:^0.2.20"
     react: "npm:^19.1.1"
     react-dom: "npm:^19.1.1"
-    react-hook-form: "npm:^7.65.0"
     tailwindcss: "npm:^4.1.14"
     typescript: "npm:~5.9.3"
     typescript-eslint: "npm:^8.45.0"

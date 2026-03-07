@@ -20,7 +20,14 @@ build/
 # Environment
 .env
 .env.local
+.env.secrets
 .envrc
+
+# Devenv
+devenv.lock
+.devenv/
+.devenv.*
+.pre-commit-config.yaml
 
 # IDE
 .vscode/
@@ -34,3 +41,4 @@ build/
 Thumbs.db
 frontend/.tanstack/tmp/*
 .direnv/*
+.pre-commit-config.yaml
