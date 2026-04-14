@@ -42,3 +42,6 @@ Thumbs.db
 frontend/.tanstack/tmp/*
 .direnv/*
 .pre-commit-config.yaml
+
+# Worktrees
+.worktrees/
