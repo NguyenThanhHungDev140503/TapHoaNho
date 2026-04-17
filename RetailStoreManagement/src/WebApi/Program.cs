@@ -1,8 +1,7 @@
-using System.Text;
 using Application;
+using Duende.AspNetCore.Authentication.JwtBearer.DPoP;
 using Infrastructure;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using WebApi.Infrastructure;
 
@@ -21,7 +20,7 @@ var MyAllowSpecificOrigins = "_myAllowSpecificOrigins";
 // CORS Configuration
 // ================================
 var corsSettings = builder.Configuration.GetSection("CorsSettings");
-var allowedOrigins = corsSettings.GetSection("AllowedOrigins").Get<string[]>() 
+var allowedOrigins = corsSettings.GetSection("AllowedOrigins").Get<string[]>()
     ?? ["http://localhost:5173"];
 
 builder.Services.AddCors(options =>
@@ -32,7 +31,8 @@ builder.Services.AddCors(options =>
             policy.WithOrigins(allowedOrigins)
                 .AllowAnyHeader()
                 .AllowAnyMethod()
-                .AllowCredentials();
+                // DPoP uses Authorization header, not credentials/cookies
+                .WithExposedHeaders("DPoP-Nonce");
         });
 });
 
@@ -60,37 +60,77 @@ builder.Services.AddControllers()
     });
 
 // ================================
-// Authentication - JWT
+// Authentication - DPoP (via IdentityServer)
 // ================================
-var jwtSettings = builder.Configuration.GetSection("JwtSettings");
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(options =>
+// The API trusts tokens issued by IdentityServer (Authority). Signing keys are
+// fetched from the /.well-known/openid-configuration discovery document —
+// no shared secret, no SymmetricSecurityKey.
+const string DPoPScheme = "dpoptokenscheme";
+var identityServerAuthority = builder.Configuration["IdentityServer:Authority"]
+    ?? "https://localhost:5001";
+
+builder.Services.AddAuthentication(DPoPScheme)
+    .AddJwtBearer(DPoPScheme, options =>
     {
-        options.TokenValidationParameters = new TokenValidationParameters
-        {
-            ValidateIssuer = true,
-            ValidateAudience = true,
-            ValidateLifetime = true,
-            ValidateIssuerSigningKey = true,
-            ValidIssuer = jwtSettings["Issuer"],
-            ValidAudience = jwtSettings["Audience"],
-            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSettings["SecretKey"]!))
-        };
-        
-        // Support token from cookie if not in header
-        options.Events = new JwtBearerEvents
-        {
-            OnMessageReceived = context =>
-            {
-                if (string.IsNullOrEmpty(context.Token))
-                {
-                    context.Token = context.Request.Cookies["accessToken"];
-                }
-                return Task.CompletedTask;
-            }
-        };
+        options.Authority = identityServerAuthority;
+
+        // Audience validation is OFF because Duende v7 issues tokens with
+        // scope-based audience (aud = scope name via ApiResource). We validate
+        // the scope claim explicitly in the authorization policy instead.
+        options.TokenValidationParameters.ValidateAudience = false;
+
+        // at+jwt = RFC 9068 "JWT Profile for OAuth 2.0 Access Tokens"
+        // Duende IdentityServer issues tokens with this typ.
+        options.TokenValidationParameters.ValidTypes = ["at+jwt"];
+
+        // Keep "role" as-is instead of mapping to ClaimTypes.Role — we shape
+        // claims with JwtClaimTypes in IdentityServer's CustomProfileService.
+        options.MapInboundClaims = false;
+
+        // Dev only: allow HTTP metadata so localhost IdentityServer works
+        // without a trusted cert on the discovery call.
+        options.RequireHttpsMetadata = !builder.Environment.IsDevelopment();
     });
-builder.Services.AddAuthorization();
+
+// Extends the "dpoptokenscheme" above with DPoP proof validation:
+//  - Verifies DPoP proof JWT signature (ES256/ES384/PS256...)
+//  - Validates htm/htu/iat/jti/ath claims
+//  - Binds proof.jkt to access_token.cnf.jkt (proof-of-possession)
+//  - Replay-detects via IDistributedCache (see below)
+builder.Services.ConfigureDPoPTokensForScheme(DPoPScheme, opt =>
+{
+    // How far in the past a proof's iat may be. Default 60s.
+    opt.ProofTokenIssuedAtClockSkew = TimeSpan.FromSeconds(30);
+
+    // Accept both DPoP-bound tokens and plain Bearer during migration.
+    // TODO: set to false after Phase 3 is complete and frontend always
+    // sends DPoP proofs. Tokens with cnf.jkt claim always require DPoP
+    // regardless of this setting — this only controls unconstrained Bearer.
+    opt.AllowBearerTokens = true;
+
+    // Replay protection — reject proofs we've seen before (jti tracking).
+    opt.EnableReplayDetection = true;
+});
+
+// Required by DPoP replay protection — stores jti of recently-seen proofs.
+// In-memory is acceptable for a single-instance dev deployment. For multi-
+// instance production, swap in Redis/SQL.
+builder.Services.AddDistributedMemoryCache();
+
+builder.Services.AddAuthorization(options =>
+{
+    // Any authenticated caller must present a token containing the retail-api
+    // scope. Role checks stay on controllers via [Authorize(Roles="Admin")].
+    options.AddPolicy("RetailApi", policy =>
+    {
+        policy.RequireAuthenticatedUser();
+        policy.RequireClaim("scope", "retail-api");
+    });
+
+    // Make "RetailApi" the fallback for every endpoint — equivalent to
+    // decorating every controller with [Authorize(Policy="RetailApi")].
+    options.FallbackPolicy = options.GetPolicy("RetailApi");
+});
 
 // ================================
 // Swagger
@@ -102,17 +142,30 @@ builder.Services.AddSwaggerGen(options =>
     {
         Title = "Retail Store Management API",
         Version = "v1",
-        Description = "API cho hệ thống quản lý cửa hàng bán lẻ - Clean Architecture + CQRS Pattern"
+        Description = "API cho hệ thống quản lý cửa hàng bán lẻ - Clean Architecture + CQRS + DPoP"
     });
-    
-    options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+
+    // OAuth2 flow via IdentityServer — Swagger UI can perform Auth Code + PKCE
+    // so testers get a real DPoP-bound token. Note: Swashbuckle's built-in UI
+    // does NOT generate DPoP proofs, so protected endpoints will fail until
+    // Phase 3 exposes a dedicated DPoP client. Kept here for Bearer fallback.
+    options.AddSecurityDefinition("oauth2", new OpenApiSecurityScheme
     {
-        In = ParameterLocation.Header,
-        Description = "Nhập token JWT (Bearer {token})",
-        Name = "Authorization",
-        Type = SecuritySchemeType.Http,
-        BearerFormat = "JWT",
-        Scheme = "Bearer"
+        Type = SecuritySchemeType.OAuth2,
+        Flows = new OpenApiOAuthFlows
+        {
+            AuthorizationCode = new OpenApiOAuthFlow
+            {
+                AuthorizationUrl = new Uri($"{identityServerAuthority}/connect/authorize"),
+                TokenUrl = new Uri($"{identityServerAuthority}/connect/token"),
+                Scopes = new Dictionary<string, string>
+                {
+                    { "openid", "OpenID identifier" },
+                    { "profile", "User profile" },
+                    { "retail-api", "Access Retail Store API" }
+                }
+            }
+        }
     });
 
     options.AddSecurityRequirement(new OpenApiSecurityRequirement
@@ -123,10 +176,10 @@ builder.Services.AddSwaggerGen(options =>
                 Reference = new OpenApiReference
                 {
                     Type = ReferenceType.SecurityScheme,
-                    Id = "Bearer"
+                    Id = "oauth2"
                 }
             },
-            Array.Empty<string>()
+            new[] { "retail-api" }
         }
     });
 });
@@ -143,9 +196,10 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI(c =>
     {
         c.SwaggerEndpoint("/swagger/v1/swagger.json", "RetailStore API v1");
+        c.OAuthClientId("react-dpop");
+        c.OAuthUsePkce();
     });
 
-    // Redirect root to Swagger UI
     app.Use(async (context, next) =>
     {
         if (context.Request.Path == "/")

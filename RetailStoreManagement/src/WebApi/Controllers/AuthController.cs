@@ -9,8 +9,18 @@ using WebApi.Models;
 namespace WebApi.Controllers;
 
 /// <summary>
-/// Controller xác thực người dùng
+/// Controller xác thực người dùng (LEGACY - self-issued JWT).
 /// </summary>
+/// <remarks>
+/// DEPRECATED: Tất cả login/logout/refresh đã chuyển sang Duende IdentityServer
+/// (https://localhost:5001). Frontend dùng Authorization Code + PKCE + DPoP thay vì
+/// POST credentials đến endpoint này. Controller được giữ lại tạm thời cho:
+///   - setup-admin endpoint (dùng trước khi IdentityServer có user đầu tiên)
+///   - Rollback path trong giai đoạn DPoPAndBearer mode
+///
+/// Sẽ bị xóa ở Phase 4.
+/// </remarks>
+[Obsolete("Authentication đã chuyển sang IdentityServer (localhost:5001). Sẽ xóa ở Phase 4.")]
 [Route("api/auth")]
 public class AuthController(IMediator mediator, IConfiguration configuration, IWebHostEnvironment environment) : BaseApiController(mediator)
 {
