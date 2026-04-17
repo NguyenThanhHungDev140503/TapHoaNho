@@ -273,14 +273,14 @@ Vì thế Authorization Code flow yêu cầu:
 - [ ] **1.6** Verify `.well-known/openid-configuration` endpoint hoạt động *(chưa test runtime)*
 
 ### ⬜ Phase 2: API — Tích Hợp DPoP Validation
-- [ ] **2.1** Copy DPoP module vào `src/WebApi/DPoP/` (từ Duende reference samples)
-- [ ] **2.2** Cài `Duende.IdentityModel` vào `WebApi.csproj`
-- [ ] **2.3** Đổi authentication scheme sang authority-based (`Authority = https://localhost:5001`)
-- [ ] **2.4** Register `ConfigureDPoPTokensForScheme("dpoptokenscheme")`
-- [ ] **2.5** Update authorization policies — `RequireClaim("scope", "retail-api")`
-- [ ] **2.6** Xóa cookie fallback trong `OnMessageReceived`
-- [ ] **2.7** Xóa/deprecate self-issued auth code
-- [ ] **2.8** Update Swagger security definition
+- [x] **2.1** DPoP module: **skip** — Duende 7.4 phát hành official package `Duende.AspNetCore.Authentication.JwtBearer 1.0.2` thay cho 11 files trong reference project
+- [x] **2.2** Cài `Duende.AspNetCore.Authentication.JwtBearer` vào `WebApi.csproj`
+- [x] **2.3** Đổi authentication scheme sang authority-based (`Authority = https://localhost:5001`, `ValidTypes=["at+jwt"]`, `MapInboundClaims=false`)
+- [x] **2.4** Register `ConfigureDPoPTokensForScheme("dpoptokenscheme")` với replay detection + in-memory distributed cache
+- [x] **2.5** Policy `"RetailApi"` (RequireAuthenticatedUser + scope=retail-api) làm FallbackPolicy
+- [x] **2.6** Xóa cookie fallback trong `OnMessageReceived` (Program.cs rewrite)
+- [x] **2.7** Mark `AuthController` `[Obsolete]` (full removal ở Phase 4)
+- [x] **2.8** Swagger: Bearer → OAuth2 Auth Code + PKCE (Swashbuckle UI không gen DPoP proof — biết limitation)
 
 ### ⬜ Phase 3: Frontend — Authorization Code + PKCE + DPoP
 - [ ] **3.1** Install `oidc-client-ts`
@@ -434,3 +434,47 @@ Reviewer tìm 3 Critical + 8 Important issues. Tất cả đã được fix:
 - **M2** `http` profile port 5063 trong launchSettings.json — minor, sửa sau.
 - **M3** `UseHsts()/UseHttpsRedirection()` — thêm khi chuẩn bị production.
 - **M6** `AccessTokenLifetime` đã giảm xuống 900s ở I2.
+
+---
+
+## Phase 2 Implementation Notes
+
+### Package Changes
+
+- **Skipped original plan task 2.1** (copy 11-file DPoP module). Duende 7.4 (released Dec 2025) phát hành official package `Duende.AspNetCore.Authentication.JwtBearer 1.0.2` — thay thế toàn bộ reference code với 1 dòng `ConfigureDPoPTokensForScheme()`.
+
+### Config.cs — Tại Sao Không Cần `ApiResource`?
+
+Access token Duende phát ra có:
+- `aud` = scope name (`"retail-api"`) nếu dùng `ApiScope`
+- `aud` = resource name nếu dùng `ApiResource`
+
+Mình dùng `ApiScope` (scope-based) → `ValidateAudience = false` + check scope claim trong policy `"RetailApi"`. Nếu sau này cần audience binding chặt hơn → thêm `ApiResource`.
+
+### DPoPOptions Thực Tế (Duende 7.4.7)
+
+API khác với plan/docs cũ:
+
+| Plan ghi | Thực tế |
+|----------|---------|
+| `ClientClockSkew` | `ProofTokenIssuedAtClockSkew` |
+| `Mode = DPoPMode.DPoPAndBearer` | `AllowBearerTokens = true` |
+| *(không nhắc)* | `EnableReplayDetection = true` (default false) |
+
+### Replay Detection
+
+`EnableReplayDetection = true` + `AddDistributedMemoryCache()`:
+- Lưu `jti` của mỗi proof vào cache
+- Proof thứ 2 với cùng `jti` → reject
+- **In-memory cache CHỈ cho dev**. Production multi-instance phải swap sang Redis/SQL vì attacker có thể retry trên instance khác.
+
+### Swagger Limitation
+
+Swashbuckle UI đã chuyển từ Bearer input → OAuth2 Auth Code + PKCE. Tester click "Authorize" trong Swagger sẽ redirect IdentityServer login, nhận access_token. **Nhưng**: Swashbuckle không biết cách tạo DPoP proof JWT → mọi request từ Swagger sẽ 401 với `invalid_dpop_proof`.
+
+Workaround:
+1. Đợi Phase 3 có React client có DPoP — test qua đó
+2. HOẶC tạm để `AllowBearerTokens = true` + trong dev **tạm tắt** `RequireDPoP` ở client config → Swagger test được với plain Bearer
+3. HOẶC cài Swashbuckle plugin DPoP (chưa có official)
+
+Tôi chọn hướng 1 (giữ `RequireDPoP = true` vì đó mới là mục tiêu). Swagger test chỉ dùng cho endpoints public.
