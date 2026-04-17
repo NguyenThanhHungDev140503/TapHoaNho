@@ -1,5 +1,5 @@
 using System.Security.Claims;
-using IdentityModel;
+using Duende.IdentityModel;
 using Duende.IdentityServer.Events;
 using Duende.IdentityServer.Services;
 using Infrastructure.Database;
