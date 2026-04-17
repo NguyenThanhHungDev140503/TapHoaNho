@@ -20,6 +20,241 @@ After:   Frontend → IdentityServer (Auth Code + PKCE) → DPoP Access Token �
 
 ---
 
+## Cơ Chế DPoP (Demonstrating Proof-of-Possession)
+
+### Vấn Đề DPoP Giải Quyết
+
+Với Bearer token thông thường, ai **giữ** token đều dùng được. Nếu attacker steal token qua XSS/log/MITM → dùng luôn.
+
+DPoP **bind** token vào một keypair mà chỉ client ban đầu giữ. Attacker steal token nhưng thiếu private key → không tạo được DPoP proof → token vô dụng.
+
+```
+Bearer:  Cầm token  →  dùng được   (thẻ ATM không PIN)
+DPoP:    Cầm token + prove có key →  dùng được   (thẻ ATM có PIN)
+```
+
+### Luồng DPoP End-to-End (5 Bước)
+
+#### Bước 1: Browser Generate Keypair (CLIENT-HELD)
+
+Frontend (ở Phase 3) sẽ:
+
+```typescript
+const keyPair = await crypto.subtle.generateKey(
+  { name: "ECDSA", namedCurve: "P-384" },
+  false,                  // extractable = false: JS không đọc được raw bytes
+  ["sign"]
+);
+// Lưu vào IndexedDB để persist qua page refresh
+```
+
+**Điểm quan trọng:** Private key là `CryptoKey` object **non-extractable**. Ngay cả XSS cũng không export được ra bytes — chỉ gọi `sign()` được.
+
+#### Bước 2: Token Request với DPoP Proof
+
+Mỗi request đến IdentityServer, client tạo một DPoP proof JWT mới:
+
+```
+Header:  { typ: "dpop+jwt", alg: "ES384", jwk: <publicKey-JWK> }
+Payload: {
+  jti: "<random-uuid>",   // unique mỗi proof → chống replay
+  htm: "POST",             // HTTP method
+  htu: "https://localhost:5001/connect/token",
+  iat: <timestamp>
+}
+Signature: ECDSA-sign bằng privateKey
+```
+
+Request:
+```http
+POST /connect/token
+DPoP: <proof-jwt>          ← Header MỚI
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=authorization_code&code=...&code_verifier=...
+```
+
+#### Bước 3: IdentityServer Validate & Bind Key
+
+IdentityServer sẽ:
+1. Verify chữ ký proof bằng `publicKey` trong header `jwk`
+2. Verify `htu`, `htm`, `iat` (trong window thời gian)
+3. Check `jti` chưa dùng (cache)
+4. Tính `jkt` = SHA-256 thumbprint của `jwk`
+5. Phát access_token với claim `cnf.jkt`:
+
+```json
+{
+  "sub": "1",
+  "scope": "retail-api",
+  "cnf": { "jkt": "<thumbprint-sha256>" }  ← "confirmation claim"
+}
+```
+
+Response:
+```json
+{
+  "access_token": "eyJ...",
+  "token_type": "DPoP",        ← KHÔNG phải "Bearer"
+  "refresh_token": "..."
+}
+```
+
+#### Bước 4: API Request — Prove Possession
+
+Client tạo proof MỚI cho mỗi API call, thêm `ath`:
+
+```
+Payload: {
+  jti: "<new-uuid>",
+  htm: "GET",
+  htu: "https://api/products",
+  iat: <timestamp>,
+  ath: SHA-256(access_token)   ← access token hash
+}
+```
+
+Request:
+```http
+GET /api/products
+Authorization: DPoP <access_token>    ← "DPoP" thay vì "Bearer"
+DPoP: <new-proof-jwt>
+```
+
+#### Bước 5: API Validate
+
+WebApi (Phase 2) sẽ:
+1. Verify chữ ký proof
+2. Verify `htm`/`htu`/`iat`
+3. Verify `ath` = SHA-256(access_token) → proof phải ràng buộc với token cụ thể
+4. Check `jti` chưa dùng
+5. Extract `jkt` từ `access_token.cnf.jkt`
+6. Tính `jkt` từ proof `jwk` → **phải KHỚP** (proof-of-possession check)
+
+### Các Tấn Công DPoP Phòng Ngừa
+
+| Tấn công | Cách phòng ngừa |
+|----------|-----------------|
+| **Token theft (XSS, log)** | Attacker có token, thiếu private key → không tạo proof |
+| **Replay attack** | `jti` unique + server cache |
+| **Token injection** | `ath` bind proof với token cụ thể |
+| **URL tampering** | `htu` phải khớp URL đích |
+| **Method tampering** | `htm` phải khớp HTTP method |
+| **Clock skew** | `iat` trong window 1-60s |
+
+### State Hiện Tại
+
+| Component | Trạng thái | Ghi chú |
+|-----------|-----------|---------|
+| IdentityServer `RequireDPoP = true` | ✅ | Client `react-dpop` bắt buộc DPoP |
+| `AddDeveloperSigningCredential()` | ✅ | RSA key sign access_token (dev only) |
+| DPoP proof validation trong WebApi | ⬜ | Phase 2 |
+| Keypair generate ở Frontend | ⬜ | Phase 3 |
+| IndexedDB persistence | ⬜ | Phase 3 |
+| Axios DPoP interceptor | ⬜ | Phase 3 |
+
+**Lưu ý:** Hiện tại chưa test được DPoP end-to-end. IdentityServer sẽ reject mọi token request vì client chưa gửi DPoP proof. Phải hoàn tất Phase 3 mới chạy được flow đầu-cuối.
+
+---
+
+## Tại Sao Cần Razor Pages Trong IdentityServer?
+
+### Câu Hỏi
+
+"IdentityServer là server phát token, tại sao lại cần UI (Razor Pages)?"
+
+### Nguyên Tắc OAuth 2.1 Cốt Lõi
+
+> **Client (React SPA) KHÔNG BAO GIỜ được nhìn thấy credential của user.**
+
+Vì thế Authorization Code flow yêu cầu:
+- User gõ password → gửi **THẲNG** đến Authorization Server
+- Client chỉ nhận lại token, không bao giờ biết password
+
+### Kiến Trúc 3 Project
+
+```
+┌─────────────────────────────────────────────────────┐
+│ IdentityServer (localhost:5001) — FULL WEB APP     │
+│  • Razor Pages: Login, Logout, Consent             │
+│  • OAuth endpoints: /connect/authorize, /connect/token
+│  • Cookie-based session để track user đã login     │
+└─────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────┐
+│ WebApi (localhost:5175) — REST API ONLY            │
+│  • /api/products, /api/orders, ...                 │
+│  • Validate DPoP proof                             │
+│  • KHÔNG có UI                                      │
+└─────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────┐
+│ Frontend (localhost:5173) — React SPA              │
+│  • Redirect sang IdentityServer để login           │
+│  • Gọi WebApi với DPoP header                      │
+└─────────────────────────────────────────────────────┘
+```
+
+### Luồng Authorization Code Khi User Login
+
+```
+1. User click "Đăng nhập" trong React app (localhost:5173)
+   ↓
+2. Client redirect toàn bộ browser đến:
+   https://localhost:5001/connect/authorize
+     ?client_id=react-dpop
+     &response_type=code
+     &scope=openid profile retail-api
+     &redirect_uri=http://localhost:5173/callback
+     &code_challenge=<PKCE>
+   ↓
+3. IdentityServer check: user chưa authenticated
+   → Redirect đến /Account/Login
+   ↓
+4. ⚠️ CHỖ CẦN RAZOR PAGES ⚠️
+   Browser hiển thị login form (HTML) tại URL:
+   localhost:5001/Account/Login?returnUrl=...
+
+   ┌─────────────────────┐
+   │ 🏪 Retail Store     │
+   │ Username: [_____]   │
+   │ Password: [_____]   │
+   │         [Đăng nhập] │
+   └─────────────────────┘
+
+   User gõ password → POST localhost:5001/Account/Login
+   ↑↑ Password gửi THẲNG đến IDS, KHÔNG qua React
+   ↓
+5. IdentityServer verify BCrypt password, set session cookie
+   Redirect về: localhost:5173/callback?code=XYZ123
+   ↓
+6. React (callback route) exchange code lấy token với DPoP proof
+```
+
+### Tại Sao Cụ Thể Là Razor Pages?
+
+3 lựa chọn host login UI trong ASP.NET Core:
+
+| Lựa chọn | Đánh giá |
+|----------|----------|
+| **Razor Pages** ✅ | Duende chính thức khuyên dùng. Tích hợp sẵn `HttpContext.SignInAsync()`, antiforgery, page model gọn |
+| MVC Views | Tương đương nhưng boilerplate hơn (Controller + View) |
+| Static HTML + API | Phải tự implement form auth, cookie set, CSRF protection → phát minh lại bánh xe |
+
+### Alternatives Đã Từ Chối
+
+| Alternative | Lý do từ chối |
+|-------------|---------------|
+| **Resource Owner Password Grant (ROPC)** | Client nhận password → vi phạm nguyên tắc. Deprecated trong OAuth 2.1. |
+| **Redirect về frontend hiển thị form** | Frontend thấy password → vi phạm nguyên tắc. Không phải Authorization Code flow thật. |
+| **Social login redirect** | Vẫn cần Razor Page để chọn provider hoặc landing page |
+
+### WebApi Không Bị Ảnh Hưởng
+
+**Quan trọng:** Chỉ `IdentityServer` project (mới) cần Razor Pages. `WebApi` của bạn vẫn thuần REST, không có file `.cshtml` nào cả.
+
+---
+
 ## Checklist Các Phase
 
 ### ✅ Phase 0: Chuẩn Bị
