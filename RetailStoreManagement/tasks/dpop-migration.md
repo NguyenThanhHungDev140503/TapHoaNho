@@ -171,5 +171,31 @@ After:   Frontend → IdentityServer (Auth Code + PKCE) → DPoP Access Token �
 
 - **Phase 2**: Cần tìm Duende reference DPoP module tại https://github.com/DuendeSoftware/Samples
 - **Phase 3**: Frontend tại `../frontend/`, cần kiểm tra package manager (npm/pnpm/yarn)
-- **Private key**: `ecdsa384-private.pem` nên được thêm vào `.gitignore` trong thực tế production
-- **appsettings.json**: Connection string đang hardcode — nên dùng user-secrets hoặc env vars khi deploy
+- **DPoP keys**: **Private key nằm ở browser (WebCrypto)**, KHÔNG phải server. Phase 3 sẽ generate ở frontend, lưu IndexedDB.
+- **Production signing key**: Hiện dùng `AddDeveloperSigningCredential()` (auto-generate tempkey.jwk). Production phải thay bằng `AddSigningCredential()` với key từ secret store.
+
+---
+
+## Code Review Round 1 (2026-04-17)
+
+Reviewer tìm 3 Critical + 8 Important issues. Tất cả đã được fix:
+
+### Critical — Đã fix
+- **C1** Credentials trong `appsettings.Development.json`: Xóa secrets, dùng `.env.secrets` qua devenv dotenv. ⚠️ Password Neon cần rotate manual vì vẫn còn trong git history.
+- **C2** Thiếu signing credential: Thêm `AddDeveloperSigningCredential()` vào `Program.cs`.
+- **C3** ECDSA keys đặt sai chỗ: Xóa 2 file `.pem`. DPoP keys là CLIENT-HELD, sẽ được browser generate ở Phase 3.
+
+### Important — Đã fix
+- **I1** Xóa `CustomResourceOwnerPasswordValidator.cs` (ROPC vi phạm OAuth 2.1).
+- **I2** `RequireDPoP = true`, `RefreshTokenUsage = OneTimeOnly`, `AccessTokenLifetime = 900s`.
+- **I3** Xóa `HostingExtensions.cs` dead code.
+- **I4** Login page dùng `IIdentityServerInteractionService.GetAuthorizationContextAsync()` để validate returnUrl + raise events.
+- **I5** Logout page POST-only với confirm page (skip nếu Duende context cho phép).
+- **I7** Dùng `JwtClaimTypes` constants thay vì string literals.
+
+### Chưa fix (defer)
+- **I6** Rate limiting/account lockout cho login — cần thêm ASP.NET Core rate limiting middleware + thêm field `FailedLoginAttempts`/`LockedUntil` vào `UserEntity`. Defer sang Phase 4.
+- **I8** Coupling IdentityServer → Infrastructure → Application: sẽ refactor thành thin abstraction ở Phase 4 nếu có thời gian.
+- **M2** `http` profile port 5063 trong launchSettings.json — minor, sửa sau.
+- **M3** `UseHsts()/UseHttpsRedirection()` — thêm khi chuẩn bị production.
+- **M6** `AccessTokenLifetime` đã giảm xuống 900s ở I2.
