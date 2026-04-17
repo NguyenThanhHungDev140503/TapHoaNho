@@ -22,8 +22,8 @@
     nodePackages.typescript
     nodePackages.eslint
     
-    # .NET SDK 9
-    dotnet-sdk_9
+    # .NET SDK 10
+    dotnet-sdk_10
     
     # PostgreSQL client (for pg_isready, psql)
     postgresql_16
@@ -44,7 +44,7 @@
   
   languages.dotnet = {
     enable = true;
-    package = pkgs.dotnet-sdk_9;
+    package = pkgs.dotnet-sdk_10;
   };
 
   # ============================================
