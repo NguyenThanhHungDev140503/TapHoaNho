@@ -1,8 +1,8 @@
 using System.Security.Claims;
+using IdentityModel;
+using Duende.IdentityServer.Extensions;
 using Duende.IdentityServer.Models;
 using Duende.IdentityServer.Services;
-using Duende.IdentityServer.Extensions;
-using Domain.Entities;
 using Infrastructure.Database;
 using Microsoft.EntityFrameworkCore;
 
@@ -20,19 +20,23 @@ public class CustomProfileService : IProfileService
     public async Task GetProfileDataAsync(ProfileDataRequestContext context)
     {
         var userId = context.Subject.GetSubjectId();
-        var user = await _dbContext.Users.FirstOrDefaultAsync(u => u.Id.ToString() == userId);
+
+        if (!int.TryParse(userId, out var id))
+            return;
+
+        var user = await _dbContext.Users
+            .AsNoTracking()
+            .FirstOrDefaultAsync(u => u.Id == id);
 
         if (user == null)
-        {
             return;
-        }
 
         var claims = new List<Claim>
         {
-            new Claim("sub", user.Id.ToString()),
-            new Claim("username", user.Username),
-            new Claim("name", user.FullName ?? string.Empty),
-            new Claim("role", user.Role.ToString())
+            new Claim(JwtClaimTypes.Subject, user.Id.ToString()),
+            new Claim(JwtClaimTypes.PreferredUserName, user.Username),
+            new Claim(JwtClaimTypes.Name, user.FullName ?? user.Username),
+            new Claim(JwtClaimTypes.Role, user.Role.ToString())
         };
 
         context.IssuedClaims.AddRange(claims);
@@ -41,8 +45,18 @@ public class CustomProfileService : IProfileService
     public async Task IsActiveAsync(IsActiveContext context)
     {
         var userId = context.Subject.GetSubjectId();
-        var user = await _dbContext.Users.FirstOrDefaultAsync(u => u.Id.ToString() == userId);
 
-        context.IsActive = user != null;
+        if (!int.TryParse(userId, out var id))
+        {
+            context.IsActive = false;
+            return;
+        }
+
+        // Projection to avoid loading full entity for every token request
+        var exists = await _dbContext.Users
+            .AsNoTracking()
+            .AnyAsync(u => u.Id == id);
+
+        context.IsActive = exists;
     }
 }

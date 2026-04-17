@@ -1,3 +1,60 @@
 @page
 @model IdentityServer.Pages.Account.Logout.IndexModel
-<p>Đang đăng xuất...</p>
+@{
+    ViewData["Title"] = "Đăng xuất";
+}
+
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@ViewData["Title"] - Retail Store</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #f0f2f5;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }
+        .card {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 16px rgba(0,0,0,0.1);
+            padding: 40px;
+            width: 100%;
+            max-width: 400px;
+            text-align: center;
+        }
+        h1 { font-size: 22px; color: #1a1a2e; margin-bottom: 12px; }
+        p { color: #555; margin-bottom: 24px; font-size: 15px; }
+        .btn {
+            width: 100%;
+            padding: 11px;
+            background: #dc2626;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .btn:hover { background: #b91c1c; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Xác nhận đăng xuất</h1>
+        <p>Bạn có chắc chắn muốn đăng xuất khỏi hệ thống không?</p>
+
+        <form method="post">
+            <input type="hidden" asp-for="LogoutId" />
+            <button type="submit" class="btn">Đăng xuất</button>
+        </form>
+    </div>
+</body>
+</html>

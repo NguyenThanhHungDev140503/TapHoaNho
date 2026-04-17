@@ -1,10 +1,12 @@
+using System.Security.Claims;
+using IdentityModel;
+using Duende.IdentityServer.Events;
 using Duende.IdentityServer.Services;
 using Infrastructure.Database;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.EntityFrameworkCore;
-using System.Security.Claims;
 
 namespace IdentityServer.Pages.Account.Login;
 
@@ -19,6 +21,7 @@ public class InputModel
 public class IndexModel : PageModel
 {
     private readonly IIdentityServerInteractionService _interaction;
+    private readonly IEventService _events;
     private readonly ApplicationDbContext _dbContext;
 
     [BindProperty]
@@ -26,9 +29,13 @@ public class IndexModel : PageModel
 
     public string? ErrorMessage { get; set; }
 
-    public IndexModel(IIdentityServerInteractionService interaction, ApplicationDbContext dbContext)
+    public IndexModel(
+        IIdentityServerInteractionService interaction,
+        IEventService events,
+        ApplicationDbContext dbContext)
     {
         _interaction = interaction;
+        _events = events;
         _dbContext = dbContext;
     }
 
@@ -42,28 +49,58 @@ public class IndexModel : PageModel
     {
         var returnUrl = Input.ReturnUrl ?? "~/";
 
+        // Get the OIDC authorization context. If returnUrl is not part of a valid
+        // authorize request AND not a local URL, reject to prevent open-redirect.
+        var context = await _interaction.GetAuthorizationContextAsync(Input.ReturnUrl);
+
+        if (context == null && !Url.IsLocalUrl(returnUrl))
+        {
+            ErrorMessage = "Invalid return URL";
+            return Page();
+        }
+
+        if (!ModelState.IsValid)
+        {
+            ErrorMessage = "Vui lòng nhập đầy đủ thông tin";
+            return Page();
+        }
+
         var user = await _dbContext.Users
             .FirstOrDefaultAsync(u => u.Username == Input.Username);
 
         if (user == null || !BCrypt.Net.BCrypt.Verify(Input.Password, user.Password))
         {
+            await _events.RaiseAsync(new UserLoginFailureEvent(
+                Input.Username,
+                "Invalid credentials",
+                clientId: context?.Client.ClientId
+            ));
+
             ErrorMessage = "Tên đăng nhập hoặc mật khẩu không đúng";
             return Page();
         }
 
+        // Shape claims using JwtClaimTypes constants for forward compatibility
         var claims = new List<Claim>
         {
-            new Claim("sub", user.Id.ToString()),
-            new Claim("username", user.Username),
-            new Claim("name", user.FullName ?? string.Empty),
-            new Claim("role", user.Role.ToString())
+            new Claim(JwtClaimTypes.PreferredUserName, user.Username),
+            new Claim(JwtClaimTypes.Name, user.FullName ?? user.Username),
+            new Claim(JwtClaimTypes.Role, user.Role.ToString())
         };
 
-        var identity = new ClaimsIdentity(claims,
-            Duende.IdentityServer.IdentityServerConstants.DefaultCookieAuthenticationScheme,
-            "sub", "role");
+        var identity = new ClaimsIdentity(
+            claims,
+            authenticationType: Duende.IdentityServer.IdentityServerConstants.DefaultCookieAuthenticationScheme,
+            nameType: JwtClaimTypes.Name,
+            roleType: JwtClaimTypes.Role
+        );
 
-        var principal = new ClaimsPrincipal(identity);
+        // Duende expects the user identifier via IdentityServerUser wrapper
+        var issuer = new Duende.IdentityServer.IdentityServerUser(user.Id.ToString())
+        {
+            DisplayName = user.FullName ?? user.Username,
+            AdditionalClaims = claims
+        };
 
         var props = new AuthenticationProperties
         {
@@ -73,11 +110,19 @@ public class IndexModel : PageModel
                 : DateTimeOffset.UtcNow.AddHours(1)
         };
 
-        await HttpContext.SignInAsync(
-            Duende.IdentityServer.IdentityServerConstants.DefaultCookieAuthenticationScheme,
-            principal,
-            props
-        );
+        await HttpContext.SignInAsync(issuer, props);
+
+        await _events.RaiseAsync(new UserLoginSuccessEvent(
+            user.Username,
+            user.Id.ToString(),
+            user.FullName ?? user.Username,
+            clientId: context?.Client.ClientId
+        ));
+
+        // If we came from an authorize request, just redirect — IdentityServer
+        // picks up the session cookie and continues the flow.
+        if (context != null)
+            return Redirect(returnUrl);
 
         if (Url.IsLocalUrl(returnUrl))
             return Redirect(returnUrl);

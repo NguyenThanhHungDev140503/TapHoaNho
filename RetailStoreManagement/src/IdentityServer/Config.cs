@@ -26,9 +26,14 @@ public static class Config
                 ClientName = "React DPoP Client",
                 ClientUri = "http://localhost:5173",
 
+                // OAuth 2.1: Authorization Code only + PKCE required
                 AllowedGrantTypes = GrantTypes.Code,
                 RequirePkce = true,
-                RequireClientSecret = false,
+                RequireClientSecret = false, // public SPA client
+
+                // DPoP: sender-constrained tokens (RFC 9449)
+                // Client must prove possession of a key on every token/API call.
+                RequireDPoP = true,
 
                 RedirectUris =
                 {
@@ -52,9 +57,15 @@ public static class Config
                 },
 
                 AllowOfflineAccess = true,
-                AccessTokenLifetime = 3600, // 1 hour
-                RefreshTokenExpiration = TokenExpiration.Absolute,
-                RefreshTokenUsage = TokenUsage.ReUse
+
+                // DPoP allows short-lived access tokens safely
+                AccessTokenLifetime = 900, // 15 minutes
+
+                // Rotate refresh tokens on every use to mitigate theft
+                RefreshTokenExpiration = TokenExpiration.Sliding,
+                RefreshTokenUsage = TokenUsage.OneTimeOnly,
+                SlidingRefreshTokenLifetime = 60 * 60 * 24 * 7, // 7 days
+                AbsoluteRefreshTokenLifetime = 60 * 60 * 24 * 30 // 30 days cap
             }
         };
 }

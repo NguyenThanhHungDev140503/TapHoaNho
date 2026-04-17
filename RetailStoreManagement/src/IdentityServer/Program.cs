@@ -19,7 +19,6 @@ builder.Services.AddIdentityServer(options =>
     options.Events.RaiseFailureEvents = true;
     options.Events.RaiseSuccessEvents = true;
 
-    // Tell IdentityServer where the login page is
     options.UserInteraction.LoginUrl = "/Account/Login";
     options.UserInteraction.LogoutUrl = "/Account/Logout";
 })
@@ -27,7 +26,9 @@ builder.Services.AddIdentityServer(options =>
 .AddInMemoryApiScopes(Config.ApiScopes)
 .AddInMemoryClients(Config.Clients)
 .AddProfileService<CustomProfileService>()
-.AddResourceOwnerValidator<CustomResourceOwnerPasswordValidator>();
+// Dev-only signing credential. Production MUST use AddSigningCredential()
+// with a persistent key from a secret store (Azure Key Vault, HashiCorp Vault, etc.).
+.AddDeveloperSigningCredential();
 
 var app = builder.Build();
 
