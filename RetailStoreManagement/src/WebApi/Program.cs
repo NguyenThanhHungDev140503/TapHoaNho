@@ -31,8 +31,14 @@ builder.Services.AddCors(options =>
             policy.WithOrigins(allowedOrigins)
                 .AllowAnyHeader()
                 .AllowAnyMethod()
-                // DPoP uses Authorization header, not credentials/cookies
-                .WithExposedHeaders("DPoP-Nonce");
+                // DPoP uses Authorization header, not credentials/cookies.
+                // Expose:
+                //   DPoP-Nonce      — server-issued nonce for replay hardening
+                //   WWW-Authenticate — DPoP challenge (needed by SPA to read
+                //                      the `dpop-nonce` parameter on 401;
+                //                      Safari historically required explicit
+                //                      exposure)
+                .WithExposedHeaders("DPoP-Nonce", "WWW-Authenticate");
         });
 });
 
@@ -121,14 +127,23 @@ builder.Services.AddAuthorization(options =>
 {
     // Any authenticated caller must present a token containing the retail-api
     // scope. Role checks stay on controllers via [Authorize(Roles="Admin")].
+    //
+    // RFC 9068 (JWT Profile for OAuth 2.0 Access Tokens) requires the `scope`
+    // claim to be a SINGLE space-separated string ("openid profile retail-api"),
+    // not a JSON array. RequireClaim does exact match, which fails. We must
+    // split the claim manually.
     options.AddPolicy("RetailApi", policy =>
     {
         policy.RequireAuthenticatedUser();
-        policy.RequireClaim("scope", "retail-api");
+        policy.RequireAssertion(ctx =>
+            ctx.User.FindAll("scope")
+                .SelectMany(c => c.Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                .Contains("retail-api"));
     });
 
     // Make "RetailApi" the fallback for every endpoint — equivalent to
     // decorating every controller with [Authorize(Policy="RetailApi")].
+    // [AllowAnonymous] still short-circuits this (verified by AuthorizationMiddleware).
     options.FallbackPolicy = options.GetPolicy("RetailApi");
 });
 
@@ -196,7 +211,10 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI(c =>
     {
         c.SwaggerEndpoint("/swagger/v1/swagger.json", "RetailStore API v1");
-        c.OAuthClientId("react-dpop");
+        // Use the dedicated "swagger-ui" IdentityServer client (no DPoP required).
+        // Tokens issued to this client are plain Bearer — valid only because the
+        // API runs in DPoPAndBearer mode during migration (AllowBearerTokens=true).
+        c.OAuthClientId("swagger-ui");
         c.OAuthUsePkce();
     });
 
