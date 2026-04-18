@@ -283,25 +283,27 @@ Vì thế Authorization Code flow yêu cầu:
 - [x] **2.8** Swagger: Bearer → OAuth2 Auth Code + PKCE với client `swagger-ui` env-gated
 - [x] **2.9** Environment gating: swagger-ui client + AllowBearerTokens chỉ active khi `IsDevelopment()`
 
-### ⬜ Phase 3: Frontend — Authorization Code + PKCE + DPoP
-- [ ] **3.1** Install `oidc-client-ts`
-- [ ] **3.2** Tạo `lib/dpop/dpopManager.ts` — generate/persist ECDSA key pair (IndexedDB)
-- [ ] **3.3** Tạo `lib/dpop/dpopProof.ts` — build + sign DPoP proof JWT
-- [ ] **3.4** Configure `oidc-client-ts` UserManager
-- [ ] **3.5** Refactor Login — redirect đến IdentityServer authorize endpoint
-- [ ] **3.6** Tạo `/callback` route — handle OIDC callback, exchange code → tokens
-- [ ] **3.7** Update Axios interceptor — thêm `Authorization: DPoP {token}` + `DPoP: {proof}`
-- [ ] **3.8** Update token refresh flow
-- [ ] **3.9** Update logout — redirect đến `end_session` endpoint
-- [ ] **3.10** Update `authStore.ts` — lưu user info từ OIDC userinfo
-- [ ] **3.11** IndexedDB key persistence
+### ✅ Phase 3: Frontend — Authorization Code + PKCE + DPoP
+- [x] **3.1** Install `oidc-client-ts` v3.5.0
+- [x] **3.2** ~~Tạo `lib/dpop/dpopManager.ts`~~ → Library tự lazy-generate keypair P-256 trong `IndexedDbDPoPStore`. Single source of truth.
+- [x] **3.3** Tạo `lib/oidc/dpop.ts` — build + sign DPoP proof JWT (ES256, htm/htu/jti/iat/ath/nonce)
+- [x] **3.4** Configure `lib/oidc/userManager.ts` — UserManager + DPoP store singleton + `requireEnv()` PROD fail-fast
+- [x] **3.5** Refactor `LoginPage.tsx` — redirect đến IdentityServer `/connect/authorize`
+- [x] **3.6** Tạo `OidcCallbackPage.tsx` + route `/callback` — exchange code → DPoP-bound tokens
+- [x] **3.7** Rewrite `lib/api/axios.ts` — `Authorization: DPoP <token>` + `DPoP: <proof>` với same-origin scoping
+- [x] **3.8** Silent renew flow + `use_dpop_nonce` retry + concurrent request queue
+- [x] **3.9** `logout()` — clearAuth + clearDPoPKeyPair (rotate) + signoutRedirect → end_session
+- [x] **3.10** Rewrite `authStore.ts` — OIDC user (string role), `initFromSession()`, individual selectors
+- [x] **3.11** Bootstrap fix: `await initFromSession()` trong `main.tsx` trước render
 
 ### ⬜ Phase 4: Backend Auth Cleanup
-- [ ] **4.1** Deprecate `AuthController` (login/refresh/logout)
-- [ ] **4.2** Deprecate `AuthService`
-- [ ] **4.3** Xóa `SetTokenCookies()`, `ClearTokenCookies()`
+- [ ] **4.1** Xóa `AuthController` (login/refresh/logout — hiện đã 410 Gone)
+- [ ] **4.2** Xóa `AuthService`, `JwtSettings`, helpers cookies
+- [ ] **4.3** Xóa cookie infrastructure đã không dùng
 - [ ] **4.4** Xóa `JwtSettings` khỏi `appsettings.json`
-- [ ] **4.5** Update CORS — thêm IdentityServer origin
+- [ ] **4.5** Update CORS — thêm IdentityServer origin nếu cần
+- [ ] **4.6** Redis distributed cache cho replay detection (production)
+- [ ] **4.7** Rate limiting / account lockout (deferred từ Phase 2 review I6)
 
 ---
 
@@ -589,3 +591,117 @@ Reviewer tìm 2 Critical + 5 Important. Đã fix 4 blockers + 1 minor:
 - **M2** Custom scheme name (no current issue).
 - **M3** `ValidateAudience = false` justified by current scope-only setup.
 - **M5** Pin package version trong Directory.Packages.props.
+
+---
+
+## Phase 3 Implementation Notes (2026-04-18)
+
+### Approach
+
+Frontend Phase 3 migrate React SPA từ cookie-based JWT auth sang OIDC Authorization Code + PKCE + DPoP. Đặc điểm chính:
+
+- **Library `oidc-client-ts` v3.5.0** xử lý hết toàn bộ OAuth + OIDC + DPoP token exchange (auth code grant + silent renew). Code app chỉ build proof cho **API requests** đến WebApi.
+- **Single DPoP store**: Library tự lazy-generate keypair P-256 non-extractable trong `IndexedDbDPoPStore` (database `oidc`, store `dpop`, key=client_id). Axios interceptor đọc cùng store qua `getDPoPKeyPair()` → cnf.jkt luôn match end-to-end.
+- **ES256/P-256 alg**: Đồng nhất với library hardcode (`CryptoUtils.generateDPoPProof` dùng `alg:"ES256"`, `generateDPoPKeys` dùng `namedCurve:"P-256"`). Mức bảo mật ~128-bit, đủ NIST yêu cầu.
+- **Same-origin scoping**: Axios chỉ attach token cho requests đến `API_ORIGIN` — defense token leak.
+
+### Files chính
+
+```
+frontend/src/lib/oidc/
+├── dpop.ts                  Build + ký proof JWT (ES256), JWK thumbprint (RFC 7638)
+└── userManager.ts           UserManager singleton, dpopStore, requireEnv() PROD
+
+frontend/src/lib/api/
+└── axios.ts                 Interceptors: DPoP attach (same-origin), nonce retry, silent renew
+
+frontend/src/features/auth/
+├── store/authStore.ts       OIDC user + initFromSession + logout + selectors
+└── pages/
+    ├── LoginPage.tsx        signinRedirect()
+    └── OidcCallbackPage.tsx /callback handler
+
+frontend/src/app/
+├── main.tsx                 await bootstrap() trước render
+└── routes/routeTree.ts      /callback ở root level
+```
+
+Doc chi tiết: `RetailStoreManagement/tasks/dpop-frontend-flow.md`
+
+---
+
+## Code Review Round 1 — Phase 3 (2026-04-18)
+
+Reviewer: superpowers:code-reviewer subagent  
+Verdict: **Not ready to merge — fix with required changes** (4 critical regressions từ store-shape change)
+
+### Critical (4) — Đã fix
+
+| # | Vấn đề | Fix |
+|---|--------|-----|
+| C1 | `useloginPage.ts` còn gọi `setAuth()` (đã đổi thành `setOidcUser`) → runtime TypeError | Xóa luôn `useloginPage.ts` + `LoginForm.tsx` + `authApi.ts` + `auth/types/api.ts` (dead code) |
+| C2 | `staff.layout.tsx`: `user.role !== 1` (số) — role giờ là string `"Staff"` | Đổi sang `user.role !== 'Staff'` |
+| C3 | `ProfilePage.tsx`: nhiều chỗ so sánh `API_CONFIG.USER_ROLES.ADMIN/STAFF` (số) với `user.role` (string) | Rewrite ProfilePage dùng store mới + `logout()`, label theo string |
+| C4 | `initFromSession()` fire-and-forget trong `main.tsx` race với route guards | `await bootstrap()` trước `ReactDOM.render()` |
+
+### Important (6/7) — Đã fix
+
+| # | Vấn đề | Fix |
+|---|--------|-----|
+| I5 | `userManager` overwrite `dpopStore` mỗi call → wipe nonce | Bỏ seed; để library lazy-generate |
+| I6 | **Hai IndexedDB store khác nhau** (custom `dpop-key-store` vs library `oidc/dpop`) → cnf.jkt mismatch risk | Xóa hết `keyStorage.ts` + `dpopKey.ts`; dùng library `IndexedDbDPoPStore` làm single source |
+| I8 (alg) | Code app dùng ES384/P-384 còn library dùng ES256/P-256 | Switch `dpop.ts` sang ES256/P-256 |
+| I9 | `clearAuth` declared `async` nhưng không có await | Bỏ keyword `async` |
+| I10 | Token leak: interceptor attach `Authorization` cho mọi URL kể cả non-API | Same-origin guard: `new URL(url).origin === API_ORIGIN` |
+| I11 | `LoginPage` dùng `window.location.replace` thay vì TanStack router | Đổi sang `navigate({to:'/'})` |
+
+I7 (multi-tab race khi tạo keypair lần đầu) → giờ là vấn đề của library, defer.
+
+### Minor — Đã fix
+
+- M5 `API_BASE_URL` cũng throw trong PROD nếu thiếu env var (parity với userManager) — round 2
+- M7 jsdoc warning trên `axiosClient` về per-request baseURL overrides — round 2
+- M1 ProfilePage Alert khi `Number(user.sub)` = NaN — round 2
+- I1 (round 2) `initFromSession` thêm `finally` reset `isLoading` defensively
+- Drop `refreshToken` khỏi zustand state (chỉ tồn tại trong oidc-client-ts session storage)
+- Individual selectors `useUser` / `useIsAuthenticated` / `useIsAuthLoading` (tránh fresh-object-per-render)
+
+### Minor — Defer
+
+- Unit tests cho `buildDPoPProof` + `computeJwkThumbprint` (chưa có vitest setup)
+- Multi-tab race khi tạo keypair lần đầu (rất hiếm; mitigation: BroadcastChannel hoặc IDB transaction)
+- `.env.production` URL placeholder (cần set trong PR/deploy doc)
+
+---
+
+## Code Review Round 2 — Phase 3 (2026-04-18)
+
+Verdict: **Ready to merge: Yes, with the small I1 hardening** ✅
+
+Reviewer xác nhận TẤT CẢ critical/important round 1 đều thực sự đã fix:
+- Single-store invariant clean
+- Alg switch ES384→ES256 consistent end-to-end
+- Bootstrap race resolved
+- Same-origin scoping correct
+- `logout()` ordering đúng + defense in depth
+- `requireEnv()` fail fast PROD
+
+Các fix nhỏ round 2:
+- I1: `initFromSession` defensive `finally` reset isLoading
+- M1: ProfilePage Alert thay silent hide
+- M5: `API_BASE_URL` PROD fail-fast parity
+- M7: jsdoc warning per-request baseURL override
+
+Lưu ý phát hiện riêng (không block merge): **dual role schema**
+- `useAuthStore.user.role` = string từ IdentityServer claims (`"Admin" | "Staff"`)
+- `UserEntity.role` = number từ admin user-management API (`0 | 1`)
+- Hai schema khác nhau là intentional, đã thêm comment làm rõ trong `features/users/types/entity.ts`
+
+### Phase 3 commits
+
+```
+32c36ad fix(frontend): address Phase 3 round 2 code review
+d63bf58 fix(frontend): address Phase 3 code review
+b85a08a docs: add DPoP frontend flow document
+cb7056e feat(frontend): Phase 3 — OIDC Authorization Code + PKCE + DPoP
+```

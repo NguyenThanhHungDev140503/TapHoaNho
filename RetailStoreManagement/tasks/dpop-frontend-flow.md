@@ -1,8 +1,8 @@
 # DPoP Frontend Flow — Tài liệu kỹ thuật chi tiết
 
-> **Phiên bản:** 1.0 — Phase 3 complete  
+> **Phiên bản:** 1.1 — Phase 3 + 2 vòng code review applied  
 > **Ngày:** 2026-04-18  
-> **Liên quan:** RFC 9449 (DPoP), RFC 7636 (PKCE), RFC 9068 (JWT Profile)
+> **Liên quan:** RFC 9449 (DPoP), RFC 7636 (PKCE), RFC 9068 (JWT Profile), RFC 7638 (JWK Thumbprint)
 
 ---
 
@@ -20,6 +20,7 @@
 10. [Tại sao kẻ tấn công không dùng được token bị đánh cắp](#10-tại-sao-kẻ-tấn-công-không-dùng-được-token-bị-đánh-cắp)
 11. [Cấu trúc DPoP Proof JWT](#11-cấu-trúc-dpop-proof-jwt)
 12. [Các biến môi trường cần thiết](#12-các-biến-môi-trường-cần-thiết)
+13. [Ghi chú kỹ thuật bổ sung](#13-ghi-chú-kỹ-thuật-bổ-sung)
 
 ---
 
@@ -29,18 +30,31 @@
 ┌─────────────────────────────────────────────────────────────┐
 │                         Browser                             │
 │                                                             │
-│  ┌───────────────┐   ┌─────────────────┐   ┌────────────┐  │
-│  │  IndexedDB    │   │ oidc-client-ts  │   │   Memory   │  │
-│  │               │   │  sessionStorage │   │            │  │
-│  │ CryptoKeyPair │   │ access_token    │   │ dpopNonce  │  │
-│  │ (privateKey   │   │ refresh_token   │   │ (từ server)│  │
-│  │  non-extract) │   │ user profile    │   │            │  │
-│  └───────────────┘   └─────────────────┘   └────────────┘  │
-│          │                   │                              │
-│          └──────────┬────────┘                              │
+│  ┌─────────────────────────┐   ┌─────────────────┐          │
+│  │  IndexedDB              │   │ oidc-client-ts  │          │
+│  │  (database "oidc",      │   │  sessionStorage │          │
+│  │   store "dpop")         │   │                 │          │
+│  │                         │   │ access_token    │          │
+│  │  key = <client_id>      │   │ refresh_token   │          │
+│  │  value = DPoPState {    │   │ user profile    │          │
+│  │    keys: CryptoKeyPair, │   │                 │          │
+│  │    nonce?: string       │   │                 │          │
+│  │  }                      │   │                 │          │
+│  │  (privateKey            │   │                 │          │
+│  │   non-extractable)      │   │                 │          │
+│  └─────────────────────────┘   └─────────────────┘          │
+│          │                              │                   │
+│          │   single source of truth     │                   │
+│          │   (shared by library +       │                   │
+│          │    our axios interceptor)    │                   │
+│          │                              │                   │
+│          └──────────┬───────────────────┘                   │
 │                     │                                       │
-│              axios interceptor                              │
+│             axios interceptor                               │
 │          (build + attach DPoP proof)                        │
+│                     │                                       │
+│         + Memory-local `dpopNonce`                          │
+│           (server-issued, cập nhật mỗi response)            │
 └─────────────────────────────────────────────────────────────┘
          │                          │
          ▼                          ▼
@@ -50,8 +64,12 @@
    refresh, logout)             + cnf.jkt binding)
 ```
 
-**Nguyên tắc cốt lõi:**  
-Private key được tạo bằng `crypto.subtle.generateKey(..., extractable=false)` — không thể export, không thể copy ra ngoài browser. Token bị đánh cắp vô dụng vì attacker không có private key tương ứng.
+**Nguyên tắc cốt lõi:**
+
+1. **Non-extractable private key.** Keypair được `oidc-client-ts` tạo bằng `crypto.subtle.generateKey({name:"ECDSA", namedCurve:"P-256"}, extractable=false, ...)` — không thể export, không thể copy ra khỏi browser.
+2. **Single-source-of-truth store.** Chỉ có một `IndexedDbDPoPStore` duy nhất (database `oidc`, object store `dpop`). Cả library (ký proof cho `/connect/token`) và axios interceptor (ký proof cho API calls) đều đọc cùng một keypair qua key = `client_id`. Do đó `cnf.jkt` luôn khớp end-to-end.
+3. **Algorithm: ES256.** `oidc-client-ts` v3 hardcode `alg:"ES256"` và `namedCurve:"P-256"`. Code ta dùng cùng alg để signature verify thành công ở cả token endpoint và resource server. P-256 vẫn đạt mức bảo mật ≥128-bit theo NIST.
+4. **Token bị đánh cắp vô dụng** vì attacker không có private key tương ứng để ký DPoP proof hợp lệ.
 
 ---
 
@@ -59,15 +77,14 @@ Private key được tạo bằng `crypto.subtle.generateKey(..., extractable=fa
 
 | File | Vai trò |
 |------|---------|
-| `src/lib/oidc/dpop.ts` | Tạo ECDSA P-384 keypair; build + ký DPoP proof JWT theo RFC 9449 |
-| `src/lib/oidc/keyStorage.ts` | Lưu/đọc/xóa `CryptoKeyPair` trong IndexedDB (không serialize private key) |
-| `src/lib/oidc/dpopKey.ts` | Singleton keypair: load từ IndexedDB, generate mới nếu chưa có |
-| `src/lib/oidc/userManager.ts` | `oidc-client-ts` `UserManager` với DPoP built-in (`IndexedDbDPoPStore`) |
-| `src/lib/api/axios.ts` | Axios interceptor: gắn `Authorization: DPoP` + `DPoP: <proof>` mỗi request |
-| `src/features/auth/store/authStore.ts` | Zustand store lưu OIDC user; `initFromSession()`, `logout()` |
-| `src/features/auth/pages/LoginPage.tsx` | Redirect đến IdentityServer thay vì hiển thị form |
-| `src/features/auth/pages/OidcCallbackPage.tsx` | Route `/callback` — xử lý code exchange sau khi login |
-| `src/app/main.tsx` | Gọi `initFromSession()` khi app khởi động |
+| `src/lib/oidc/dpop.ts` | Build + ký DPoP proof JWT theo RFC 9449 (ES256/P-256). Tính JWK thumbprint theo RFC 7638. Không quản lý key — key thuộc về library. |
+| `src/lib/oidc/userManager.ts` | `oidc-client-ts` `UserManager` config + DPoP store singleton (`IndexedDbDPoPStore`). Export `getDPoPKeyPair()`, `clearDPoPKeyPair()`, `signinRedirect()`, `signinCallback()`, `silentRenew()`, `signoutRedirect()`. Fail-fast nếu thiếu env vars trong PROD. |
+| `src/lib/api/axios.ts` | Axios interceptor: gắn `Authorization: DPoP <token>` + `DPoP: <proof>` chỉ cho requests đến `API_ORIGIN` (same-origin scoping); retry 1 lần khi gặp `use_dpop_nonce`; silent renew khi 401. |
+| `src/features/auth/store/authStore.ts` | Zustand store lưu OIDC user (role string từ claims); `initFromSession()`, `clearAuth()` (sync); export `logout()` xoay key + redirect end_session. Individual selectors: `useUser`, `useIsAuthenticated`, `useIsAuthLoading`. |
+| `src/features/auth/pages/LoginPage.tsx` | Redirect đến IdentityServer (`signinRedirect()`). Không có form. |
+| `src/features/auth/pages/OidcCallbackPage.tsx` | Route `/callback` — gọi `signinCallback()`, lưu user, redirect về `returnTo`. |
+| `src/app/main.tsx` | `await initFromSession()` TRƯỚC khi `ReactDOM.render()` để route guards thấy session đã restored trên hard reload. |
+| `src/app/routes/routeTree.ts` | Mount `/callback` route ở root level (ngoài layouts). |
 
 ---
 
@@ -77,11 +94,17 @@ Private key được tạo bằng `crypto.subtle.generateKey(..., extractable=fa
 Browser mở lần đầu
         │
         ▼
-main.tsx: useAuthStore.getState().initFromSession()
+main.tsx: bootstrap()
         │
-        ├─► getUser() từ oidc-client-ts → null (chưa có gì trong sessionStorage)
+        ├─► await useAuthStore.getState().initFromSession()
+        │       │
+        │       ├─► getUser() từ oidc-client-ts → null (chưa có gì)
+        │       │
+        │       └─► finally: isLoading = false
         │
-        └─► authStore: { user: null, isAuthenticated: false, isLoading: false }
+        ├─► authStore: { user: null, isAuthenticated: false, isLoading: false }
+        │
+        └─► ReactDOM.createRoot().render(...)
                 │
                 ▼
         Route guard thấy !isAuthenticated → redirect /auth/login
@@ -89,46 +112,45 @@ main.tsx: useAuthStore.getState().initFromSession()
                 ▼
         LoginPage mount → useEffect chạy
                 │
-                ├─► [1] getDPoPKeyPair()
-                │           │
-                │           ├─► loadKeyPair() từ IndexedDB → null (lần đầu)
-                │           │
-                │           └─► generateDPoPKeyPair()
-                │                   │
-                │                   ├─► crypto.subtle.generateKey(
-                │                   │       { name: "ECDSA", namedCurve: "P-384" },
-                │                   │       extractable = FALSE   ← KHÔNG THỂ EXPORT
-                │                   │       ["sign", "verify"]
-                │                   │   )
-                │                   │   → CryptoKeyPair { publicKey, privateKey }
-                │                   │
-                │                   └─► saveKeyPair(keyPair) → IndexedDB
-                │
-                ├─► [2] getUserManager()
-                │           │
-                │           ├─► new IndexedDbDPoPStore("dpop-oidc", "dpop-keys")
-                │           ├─► dpopStore.set("react-dpop", new DPoPState(keyPair))
-                │           └─► new UserManager({ authority, client_id, dpop: { store } })
-                │
-                └─► [3] mgr.signinRedirect()
-                            │
-                            ├─► Tạo code_verifier (PKCE random string)
-                            ├─► code_challenge = BASE64URL(SHA256(code_verifier))
-                            ├─► dpop_jkt = JWK thumbprint của publicKey  ← bind code với key
-                            ├─► Lưu state + code_verifier vào sessionStorage
-                            │
-                            └─► Redirect browser đến:
-                                GET https://localhost:5001/connect/authorize
-                                    ?client_id=react-dpop
-                                    &response_type=code
-                                    &scope=openid profile retail-api offline_access
-                                    &redirect_uri=http://localhost:5173/callback
-                                    &code_challenge=<hash>
-                                    &code_challenge_method=S256
-                                    &dpop_jkt=<key_thumbprint>   ← RFC 9449 § 10
+                └─► signinRedirect() → mgr.signinRedirect()
+                        │
+                        ├─► [LIBRARY LAZY-GEN] generateDPoPJkt(dpopSettings)
+                        │       │
+                        │       ├─► dpopStore.get(client_id) → null (lần đầu)
+                        │       │
+                        │       ├─► CryptoUtils.generateDPoPKeys()
+                        │       │       │
+                        │       │       └─► crypto.subtle.generateKey(
+                        │       │               { name: "ECDSA", namedCurve: "P-256" },
+                        │       │               extractable = FALSE   ← KHÔNG THỂ EXPORT
+                        │       │               ["sign", "verify"]
+                        │       │           )
+                        │       │           → CryptoKeyPair { publicKey, privateKey }
+                        │       │
+                        │       ├─► dpopStore.set(client_id, new DPoPState(keyPair))
+                        │       │       → Lưu vào IndexedDB "oidc"/"dpop"
+                        │       │
+                        │       └─► return CryptoUtils.generateDPoPJkt(keyPair)
+                        │
+                        ├─► Tạo code_verifier (PKCE random string)
+                        ├─► code_challenge = BASE64URL(SHA256(code_verifier))
+                        ├─► dpop_jkt = thumbprint của public key  ← bind code với key
+                        ├─► Lưu state + code_verifier vào sessionStorage
+                        │
+                        └─► Redirect browser đến:
+                            GET https://localhost:5001/connect/authorize
+                                ?client_id=react-dpop
+                                &response_type=code
+                                &scope=openid profile retail-api offline_access
+                                &redirect_uri=http://localhost:5173/callback
+                                &code_challenge=<hash>
+                                &code_challenge_method=S256
+                                &dpop_jkt=<key_thumbprint>   ← RFC 9449 § 10
 ```
 
-> **`dpop_jkt`** là thumbprint (SHA-256 hash) của public key. IdentityServer lưu nó vào authorization code — khi frontend exchange code lấy token, phải chứng minh sở hữu cùng private key đó.
+> **`dpop_jkt`** là JWK thumbprint (SHA-256) của public key. IdentityServer lưu nó vào authorization code — khi frontend exchange code lấy token, phải chứng minh sở hữu cùng private key đó.
+>
+> **Khác với phiên bản trước:** `oidc-client-ts` v3 tự lazy-generate keypair khi ta gọi `signinRedirect()` lần đầu (do `bind_authorization_code: true`). Trước đây code app tự generate trong `LoginPage.useEffect` rồi seed vào store — giờ giao hết cho library, tránh dual-store divergence.
 
 ---
 
@@ -155,20 +177,20 @@ Browser load /callback → OidcCallbackPage mount
                 ├─► [2] Validate state (phải khớp với state đã lưu → chống CSRF)
                 ├─► [3] Lấy code_verifier từ sessionStorage (PKCE)
                 │
-                ├─► [4] Build DPoP proof JWT cho token endpoint:
+                ├─► [4] [LIBRARY] Build DPoP proof JWT cho token endpoint:
                 │           header: {
                 │               typ: "dpop+jwt",
-                │               alg: "ES384",
-                │               jwk: { kty, crv, x, y }  ← chỉ public key
+                │               alg: "ES256",
+                │               jwk: { kty, crv:"P-256", x, y }   ← public key only
                 │           }
                 │           payload: {
-                │               jti: "550e8400-...",       ← uuid duy nhất mỗi lần
+                │               jti: crypto.randomUUID(),
                 │               htm: "POST",
                 │               htu: "https://localhost:5001/connect/token",
                 │               iat: 1713456789
                 │               // KHÔNG có ath — chưa có access_token
                 │           }
-                │           signature: ECDSA-P384(privateKey, header.payload)
+                │           signature: ECDSA-P256(privateKey, header.payload)
                 │
                 └─► [5] POST https://localhost:5001/connect/token
                             Content-Type: application/x-www-form-urlencoded
@@ -217,8 +239,22 @@ Component: axiosClient.get('/api/admin/products')
         ▼
 [Request Interceptor]
         │
+        ├─► buildFullUrl(config) → "http://localhost:5175/api/admin/products"
+        │
+        ├─► [SAME-ORIGIN GUARD] new URL(url).origin === API_ORIGIN ?
+        │       │
+        │       ├─► Khớp → tiếp tục gắn DPoP
+        │       └─► Không khớp → return config (gửi unauthenticated)
+        │           Bảo vệ chống token leak nếu lỡ gọi axiosClient
+        │           với baseURL trỏ third-party host.
+        │
         ├─► getUser() từ oidc-client-ts → { access_token: "eyJ...", ... }
-        ├─► getDPoPKeyPair() → CryptoKeyPair từ IndexedDB (singleton)
+        │       │
+        │       └─► Nếu null (chưa login) → return config (no auth)
+        │
+        ├─► getDPoPKeyPair() → đọc dpopStore.get(CLIENT_ID)
+        │       → Cùng keypair library đã dùng cho /connect/token (single source)
+        │       → Nếu null (chưa login) → return config
         │
         ├─► buildDPoPProof(keyPair, {
         │       htm: "GET",
@@ -229,10 +265,10 @@ Component: axiosClient.get('/api/admin/products')
         │       │
         │       ├─► ath = BASE64URL(SHA256(ASCII(access_token)))
         │       │
-        │       └─► Sign ECDSA-P384:
-        │               header: { typ:"dpop+jwt", alg:"ES384", jwk:{publicKey} }
+        │       └─► Sign ECDSA-P256:
+        │               header: { typ:"dpop+jwt", alg:"ES256", jwk:{publicKey} }
         │               payload: {
-        │                   jti:  "uuid-mới-mỗi-request",  ← replay detection
+        │                   jti:  crypto.randomUUID(),  ← replay detection
         │                   htm:  "GET",
         │                   htu:  "http://localhost:5175/api/admin/products",
         │                   iat:  1713456789,
@@ -249,7 +285,7 @@ Component: axiosClient.get('/api/admin/products')
         │
         ├─► Verify proof signature  (public key lấy từ jwk trong proof header)
         ├─► Verify typ == "dpop+jwt"
-        ├─► Verify alg == "ES384"  (hoặc các alg được chấp nhận)
+        ├─► Verify alg ∈ accepted set (default chấp nhận ES256/ES384/PS256...)
         ├─► Verify htm == "GET"    (khớp HTTP method của request)
         ├─► Verify htu == request URL (không có query string)
         ├─► Verify |now - iat| ≤ 30s  (clock skew = ProofTokenIssuedAtClockSkew)
@@ -389,23 +425,23 @@ silentRenew() thất bại
 ## 9. Case 7 — Logout
 
 ```
-User click Logout → logout() (trong authStore.ts)
+User click Logout → logout() (export từ authStore.ts)
         │
-        ├─► [1] authStore.clearAuth()
-        │           → { user: null, isAuthenticated: false }
+        ├─► [1] useAuthStore.getState().clearAuth()
+        │           → { user: null, isAuthenticated: false, isLoading: false }
         │           → Mọi route guard redirect về /auth/login ngay lập tức
+        │           (Lưu ý: clearAuth là hàm ĐỒNG BỘ, không async)
         │
-        ├─► [2] rotateDPoPKeyPair()
-        │           ├─► _keyPair = null   (xóa khỏi memory)
-        │           └─► clearKeyPair()    (xóa khỏi IndexedDB)
+        ├─► [2] await clearDPoPKeyPair()
+        │           → dpopStore.remove(CLIENT_ID)
+        │           → Xóa DPoPState (cả keys + nonce) khỏi IndexedDB
         │
         │       Tại sao phải rotate key khi logout?
-        │       → Session tiếp theo dùng keypair MỚI hoàn toàn
-        │       → Nếu attacker đã có token cũ + (giả sử) giữ được public key cũ,
-        │         token đó cũng đã bị revoke ở IdentityServer
-        │       → Defense in depth
+        │       → Session tiếp theo, library lazy-generate keypair MỚI
+        │       → Defense in depth: kể cả attacker giữ được token + proof cũ,
+        │         IdentityServer đã revoke session, keypair mới ≠ cũ
         │
-        └─► [3] signoutRedirect() → mgr.signoutRedirect()
+        └─► [3] await signoutRedirect() → mgr.signoutRedirect()
                     │
                     └─► Redirect đến IdentityServer:
                         GET https://localhost:5001/connect/endsession
@@ -416,6 +452,11 @@ User click Logout → logout() (trong authStore.ts)
                             ├─► Revoke session
                             ├─► Optionally revoke refresh_token
                             └─► Redirect về http://localhost:5173
+
+Trường hợp user đóng tab giữa chừng (sau bước 2, trước khi end_session hoàn tất):
+        → Refresh token còn trong sessionStorage nhưng KHÔNG dùng được
+          (cnf.jkt mismatch khi gọi /connect/token vì keypair đã bị xóa)
+        → Library sẽ tự cleanup expired user trong getUser() lần kế tiếp
 ```
 
 ---
@@ -487,10 +528,10 @@ Kết luận
 ─── HEADER ──────────────────────────────────────────────────────
 {
     "typ": "dpop+jwt",          ← BẮT BUỘC: phân biệt với access token
-    "alg": "ES384",             ← ECDSA P-384 / SHA-384
+    "alg": "ES256",             ← ECDSA P-256 / SHA-256
     "jwk": {                    ← PUBLIC key nhúng trực tiếp
         "kty": "EC",
-        "crv": "P-384",
+        "crv": "P-256",
         "x":   "BASE64URL...",
         "y":   "BASE64URL..."
         // KHÔNG có "d" (private key) — chỉ public key
@@ -508,11 +549,15 @@ Kết luận
 }
 
 ─── SIGNATURE ───────────────────────────────────────────────────
-ECDSA-P384(
+ECDSA-P256(
     privateKey,
     BASE64URL(header) + "." + BASE64URL(payload)
 )
 ```
+
+> **Tại sao ES256/P-256 thay vì ES384/P-384?**
+> `oidc-client-ts` v3.5.0 hardcode `alg:"ES256"` và `namedCurve:"P-256"` trong `CryptoUtils.generateDPoPProof` và `generateDPoPKeys`. Nếu code app ký proof bằng alg khác, server sẽ vẫn verify được (DPoP cho phép multi-alg) NHƯNG keypair sẽ khác → cnf.jkt mismatch → 401 ngay. Đồng nhất alg là cách duy nhất giữ single-source-of-truth keypair.
+> P-256 đạt mức bảo mật ~128-bit, vẫn meets NIST post-2030 requirement và được khuyến nghị cho DPoP.
 
 **Tại sao mỗi claim quan trọng:**
 
@@ -538,3 +583,48 @@ ECDSA-P384(
 | `VITE_OIDC_POST_LOGOUT_URI` | `http://localhost:5173` | `https://example.com` |
 
 > Các giá trị `VITE_OIDC_REDIRECT_URI` và `VITE_OIDC_POST_LOGOUT_URI` phải khớp chính xác với `RedirectUris` và `PostLogoutRedirectUris` trong `IdentityServer/Config.cs`.
+
+**Fail-fast trong PROD:**  
+Cả `VITE_API_BASE_URL` (trong `axios.ts`) và tất cả `VITE_OIDC_*` (trong `userManager.ts`) đều được đọc qua helper `requireEnv()` tương đương. Nếu thiếu trong `import.meta.env.PROD` build, app THROW ngay khi module load — không có fallback localhost âm thầm đi vào production.
+
+---
+
+## 13. Ghi chú kỹ thuật bổ sung
+
+### 13.1. Dual role schema
+
+Hệ thống hiện có **hai source of truth khác nhau** cho role của user — dễ nhầm lẫn:
+
+| Source | Kiểu | Giá trị | Dùng ở đâu |
+|--------|------|---------|------------|
+| IdentityServer JWT claims (`role` claim) | **string** | `"Admin"` \| `"Staff"` | `authStore.user.role`, route guards (`isAdmin()`, `isStaff()`), UI hiển thị role của user đang login |
+| Admin user-management API (`/api/admin/users/*`) | **number** | `0` (Admin) \| `1` (Staff) | `UserEntity.role` — lọc danh sách users, hiển thị bảng quản lý user |
+
+**Không được cross-compare** giữa hai schema. Quy tắc:
+- Permission của user đang login → `useAuthStore().user.role === 'Admin'`
+- Filter danh sách trong user-management → `user.role === API_CONFIG.USER_ROLES.ADMIN` (số)
+
+### 13.2. Single-store invariant
+
+Keypair được quản lý bởi **đúng một** `IndexedDbDPoPStore` (singleton export từ `userManager.ts`):
+- Library dùng store này khi ký proof cho `/connect/token` (lúc code exchange + silent renew)
+- Axios interceptor dùng store này khi ký proof cho API calls
+- → Cùng một keypair, nên `proof.jwk.thumbprint == token.cnf.jkt` luôn đúng
+
+Nếu trong tương lai ai đó tạo thêm một `IndexedDbDPoPStore` khác hoặc tự implement `DPoPStore`, phải đảm bảo cùng database/store name (`"oidc"` / `"dpop"`) và cùng key (`client_id`).
+
+### 13.3. Same-origin token attachment
+
+Axios interceptor chỉ gắn `Authorization: DPoP <token>` và `DPoP: <proof>` khi **resolved origin khớp `API_ORIGIN`** (parse từ `VITE_API_BASE_URL`). Nếu lỡ gọi `axiosClient.get('https://third-party.example/...')`, request sẽ đi ra KHÔNG kèm token — tránh rò rỉ credential qua third-party host.
+
+Nếu cần authenticated call tới origin khác, tạo axios instance riêng, không override `baseURL` per-request trên `axiosClient`.
+
+### 13.4. Bootstrap ordering
+
+```
+main.tsx bootstrap():
+   1. await useAuthStore.initFromSession()   ← restore user từ oidc-client-ts
+   2. ReactDOM.createRoot().render(...)
+```
+
+Phải await bước 1 trước khi render. Nếu fire-and-forget, route guards (`isAuthenticated` đọc đồng bộ) sẽ fire trước khi session restore xong → hard-reload trang protected đá user về `/auth/login` sai.
