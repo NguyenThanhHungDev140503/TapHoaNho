@@ -7,6 +7,7 @@ import { mainLayoutRoute } from './layout/main.layout';
 import { createAdminLayoutRoute } from './layout/admin.layout';
 import { createStaffLayoutRoute } from './layout/staff.layout';
 import { authRoutes } from './modules/auth.routes';
+import { OidcCallbackPage } from '../../features/auth/pages/OidcCallbackPage';
 import { staffRoutes } from './modules/staff.routes';
 // ... import các module routes khác như trong file gốc
 import { productsRoutes } from './modules/management/products.routes';
@@ -141,9 +142,17 @@ staffLayoutRoute.addChildren(staffRoutesBuilt);
 mainLayoutRoute.addChildren([adminLayoutRoute, staffLayoutRoute]);
 
 // 7. Xây dựng cây routing cuối cùng
+// OIDC callback — /callback — renders outside all layouts
+const oidcCallbackRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/callback',
+  component: OidcCallbackPage,
+});
+
 const routeTree = rootRoute.addChildren([
-  authLayoutRoute, // Auth layout (không có sidebar)
-  mainLayoutRoute, // Main layout (có sidebar) - chứa home và admin routes
+  oidcCallbackRoute,    // /callback — OIDC code exchange
+  authLayoutRoute,      // Auth layout (không có sidebar)
+  mainLayoutRoute,      // Main layout (có sidebar) - chứa home và admin routes
 ]);
 
 // 5. Khởi tạo router với context

@@ -7,6 +7,13 @@ import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import 'antd/dist/reset.css';
 import { router } from './routes/routeTree'; // Import the router from routeTree
 import { queryClient } from '../lib/query/queryClient';
+import { useAuthStore } from '../features/auth/store/authStore';
+
+// Restore OIDC session from oidc-client-ts session storage on app boot.
+// This is async but intentionally fire-and-forget here — the authStore
+// sets isLoading=true initially and flips it false once done, so
+// any protected route can gate on isLoading.
+useAuthStore.getState().initFromSession();
 
 // Render the app
 const rootElement = document.getElementById('root')!
