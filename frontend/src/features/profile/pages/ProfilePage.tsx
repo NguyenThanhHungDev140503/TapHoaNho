@@ -86,10 +86,17 @@ export const ProfilePage: React.FC = () => {
           </Descriptions>
         </Card>
 
-        {Number.isFinite(numericUserId) && (
+        {Number.isFinite(numericUserId) ? (
           <Card title="Đơn hàng đã tạo">
             <ProfileOrdersTable userId={numericUserId} />
           </Card>
+        ) : (
+          <Alert
+            type="info"
+            showIcon
+            message="Đơn hàng không khả dụng"
+            description="Tài khoản này không có ID dạng số nên không thể tải lịch sử đơn hàng."
+          />
         )}
       </Space>
     </div>

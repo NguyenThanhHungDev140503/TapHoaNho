@@ -47,8 +47,16 @@ export const tokenUtils = {
 // Config
 // ─────────────────────────────────────────────────────────────────────────────
 
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined)
-  ?? 'http://localhost:5175';
+const API_BASE_URL = (() => {
+  const value = import.meta.env.VITE_API_BASE_URL as string | undefined;
+  if (value) return value;
+  if (import.meta.env.PROD) {
+    throw new Error(
+      '[axios] Missing required environment variable VITE_API_BASE_URL in production build.',
+    );
+  }
+  return 'http://localhost:5175';
+})();
 
 /**
  * Origin that should receive Authorization + DPoP headers. Anything else
@@ -64,6 +72,12 @@ const axiosClient: AxiosInstance = axios.create({
   // DPoP uses Authorization header — no cookies needed.
   withCredentials: false,
 });
+// WARNING: requests whose resolved origin does NOT match API_ORIGIN are
+// sent WITHOUT Authorization / DPoP headers (see request interceptor below).
+// This is deliberate — it prevents the access token from leaking to a
+// third-party host if `baseURL` is accidentally overridden per-request.
+// If you legitimately need an authenticated call to a different origin,
+// build a separate axios instance for that host.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // State

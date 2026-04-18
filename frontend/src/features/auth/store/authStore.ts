@@ -80,6 +80,11 @@ export const useAuthStore = create<AuthState>()(
           }
         } catch {
           set({ user: null, isAuthenticated: false, isLoading: false });
+        } finally {
+          // Defensive: guarantee isLoading flips false even if a future
+          // change to setOidcUser forgets to clear it. Otherwise the app
+          // would hang on the loading splash forever.
+          if (get().isLoading) set({ isLoading: false });
         }
       },
 
