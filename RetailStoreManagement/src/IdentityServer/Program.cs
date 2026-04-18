@@ -24,7 +24,7 @@ builder.Services.AddIdentityServer(options =>
 })
 .AddInMemoryIdentityResources(Config.IdentityResources)
 .AddInMemoryApiScopes(Config.ApiScopes)
-.AddInMemoryClients(Config.Clients)
+.AddInMemoryClients(Config.Clients(builder.Environment.IsDevelopment()))
 .AddProfileService<CustomProfileService>()
 // Dev-only signing credential. Production MUST use AddSigningCredential()
 // with a persistent key from a secret store (Azure Key Vault, HashiCorp Vault, etc.).

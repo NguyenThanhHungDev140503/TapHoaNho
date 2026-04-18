@@ -103,20 +103,31 @@ builder.Services.AddAuthentication(DPoPScheme)
 //  - Validates htm/htu/iat/jti/ath claims
 //  - Binds proof.jkt to access_token.cnf.jkt (proof-of-possession)
 //  - Replay-detects via IDistributedCache (see below)
+//
+// AllowBearerTokens policy is environment-driven:
+//   Development → true   : Swagger UI (swagger-ui client) can test with plain
+//                          Bearer. DPoP-bound tokens still require proof
+//                          regardless (cnf.jkt enforcement is unconditional).
+//   Production  → false  : Refuse all unconstrained Bearer tokens. Only
+//                          DPoP-bound tokens with valid proof accepted.
+//                          Defense in depth — even if "swagger-ui" client
+//                          accidentally exists in prod IdentityServer, its
+//                          plain-Bearer tokens are useless here.
+//
+// ASPNETCORE_ENVIRONMENT is loaded by devenv from .env.secrets into the
+// shell, then read by ASP.NET Core into builder.Environment.
+var allowBearerTokens = builder.Environment.IsDevelopment();
+
 builder.Services.ConfigureDPoPTokensForScheme(DPoPScheme, opt =>
 {
-    // How far in the past a proof's iat may be. Default 60s.
     opt.ProofTokenIssuedAtClockSkew = TimeSpan.FromSeconds(30);
-
-    // Accept both DPoP-bound tokens and plain Bearer during migration.
-    // TODO: set to false after Phase 3 is complete and frontend always
-    // sends DPoP proofs. Tokens with cnf.jkt claim always require DPoP
-    // regardless of this setting — this only controls unconstrained Bearer.
-    opt.AllowBearerTokens = true;
-
-    // Replay protection — reject proofs we've seen before (jti tracking).
+    opt.AllowBearerTokens = allowBearerTokens;
     opt.EnableReplayDetection = true;
 });
+
+logger.LogInformation(
+    "DPoP token validation: AllowBearerTokens={AllowBearer} (env={Env})",
+    allowBearerTokens, environment);
 
 // Required by DPoP replay protection — stores jti of recently-seen proofs.
 // In-memory is acceptable for a single-instance dev deployment. For multi-
@@ -160,10 +171,14 @@ builder.Services.AddSwaggerGen(options =>
         Description = "API cho hệ thống quản lý cửa hàng bán lẻ - Clean Architecture + CQRS + DPoP"
     });
 
-    // OAuth2 flow via IdentityServer — Swagger UI can perform Auth Code + PKCE
-    // so testers get a real DPoP-bound token. Note: Swashbuckle's built-in UI
-    // does NOT generate DPoP proofs, so protected endpoints will fail until
-    // Phase 3 exposes a dedicated DPoP client. Kept here for Bearer fallback.
+    // OAuth2 flow via IdentityServer — Swagger UI redirects to IdentityServer
+    // login + exchanges the auth code for a token. Uses the "swagger-ui" client
+    // (no DPoP) which only exists in Development.
+    //
+    // In Production: UseSwagger/UseSwaggerUI is gated by IsDevelopment() below,
+    // AND the "swagger-ui" IdentityServer client doesn't exist,
+    // AND the API sets AllowBearerTokens = false.
+    // Three independent gates → can't accidentally ship.
     options.AddSecurityDefinition("oauth2", new OpenApiSecurityScheme
     {
         Type = SecuritySchemeType.OAuth2,
