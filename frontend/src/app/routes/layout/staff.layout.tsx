@@ -21,9 +21,9 @@ export function createStaffLayoutRoute(parentRoute: AnyRoute) {
       }
 
       // Kiểm tra quyền staff - chỉ Staff được truy cập, Admin không được
-      // Admin có role === 0, Staff có role === 1
+      // Role claim từ IdentityServer là string: "Admin" | "Staff"
       const { user } = useAuthStore.getState();
-      if (!user || user.role !== 1) {
+      if (!user || user.role !== 'Staff') {
         throw redirect({
           to: '/auth/unauthorized' as any,
         });

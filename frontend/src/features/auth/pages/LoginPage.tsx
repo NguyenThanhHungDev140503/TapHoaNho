@@ -7,15 +7,17 @@
 
 import { Card, Spin } from "antd";
 import React, { useEffect } from 'react';
+import { useNavigate } from '@tanstack/react-router';
 import { signinRedirect } from '../../../lib/oidc/userManager';
-import { useAuth } from '../store/authStore';
+import { useIsAuthenticated } from '../store/authStore';
 
 export const LoginPage: React.FC = () => {
-  const { isAuthenticated } = useAuth();
+  const isAuthenticated = useIsAuthenticated();
+  const navigate = useNavigate();
 
   useEffect(() => {
     if (isAuthenticated) {
-      window.location.replace('/');
+      void navigate({ to: '/' });
       return;
     }
 
@@ -29,7 +31,7 @@ export const LoginPage: React.FC = () => {
     signinRedirect().catch((err) => {
       console.error('[OIDC] signinRedirect failed:', err);
     });
-  }, [isAuthenticated]);
+  }, [isAuthenticated, navigate]);
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 p-6">

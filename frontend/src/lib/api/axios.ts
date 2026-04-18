@@ -2,22 +2,24 @@
  * Axios client — DPoP-aware HTTP client
  *
  * Request flow (per RFC 9449):
- *   1. Retrieve current access token from oidc-client-ts session storage.
- *   2. Build a DPoP proof JWT:
- *        header: { typ:"dpop+jwt", alg:"ES384", jwk:<public_key> }
- *        payload: { jti, htm, htu, iat, ath: BASE64URL(SHA-256(access_token)), nonce? }
- *   3. Attach:
+ *   1. Resolve target URL. Skip DPoP entirely if it doesn't point to the
+ *      configured API origin (defense against accidentally leaking the
+ *      access token + a bound proof to a third-party host).
+ *   2. Retrieve the current access token + DPoP keypair (both managed by
+ *      oidc-client-ts in IndexedDB / sessionStorage).
+ *   3. Build a DPoP proof JWT and attach:
  *        Authorization: DPoP <access_token>
  *        DPoP: <proof_jwt>
  *
- * 401 with DPoP-Nonce:
- *   Server replies with `DPoP-Nonce: <server_nonce>` when proof nonce is required.
- *   The interceptor retries exactly once with the nonce included in the proof.
+ * 401 with use_dpop_nonce:
+ *   Server replies WWW-Authenticate: DPoP error="use_dpop_nonce"
+ *                  DPoP-Nonce: <server_nonce>
+ *   The interceptor retries exactly once with the nonce in the proof.
  *
  * Token refresh:
- *   On 401 without nonce (token expired), calls silentRenew() which exchanges
- *   the refresh token for a new DPoP-bound access token via oidc-client-ts.
- *   Then retries the original request.
+ *   On a plain 401 (no nonce challenge), call silentRenew() which exchanges
+ *   the refresh token for a new DPoP-bound access token (same keypair).
+ *   Then retry the original request.
  */
 
 import axios from 'axios';
@@ -27,31 +29,39 @@ import type {
   AxiosResponse,
   InternalAxiosRequestConfig,
 } from 'axios';
-import { API_CONFIG } from '../../config/api.config';
 import type { ApiResponse } from './types/api.types';
 import { useAuthStore } from '../../features/auth/store/authStore';
-import { getUser, silentRenew } from '../oidc/userManager';
+import { getUser, silentRenew, getDPoPKeyPair } from '../oidc/userManager';
 import { buildDPoPProof } from '../oidc/dpop';
-import { getDPoPKeyPair } from '../oidc/dpopKey';
 import { ENDPOINTS } from '../../app/routes/type/routes.endpoint';
 
-// Keep tokenUtils shim so other files that import it don't break.
+// Keep tokenUtils shim so legacy callers don't break at import time.
 export const tokenUtils = {
   getToken: (): string | null => null,
   getRefreshToken: (): string | null => null,
-  setTokens: (): void => { /* no-op — tokens live in oidc-client-ts session storage */ },
+  setTokens: (): void => { /* tokens live in oidc-client-ts session storage */ },
   clearAllTokens: (): void => { /* no-op */ },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Axios instance
+// Config
 // ─────────────────────────────────────────────────────────────────────────────
 
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined)
+  ?? 'http://localhost:5175';
+
+/**
+ * Origin that should receive Authorization + DPoP headers. Anything else
+ * (third-party APIs, CDN URLs accidentally fed to axiosClient) is sent
+ * unauthenticated.
+ */
+const API_ORIGIN = new URL(API_BASE_URL).origin;
+
 const axiosClient: AxiosInstance = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:5175',
+  baseURL: API_BASE_URL,
   timeout: 10000,
   headers: { 'Content-Type': 'application/json' },
-  // DPoP uses Authorization header — no cookies needed for auth.
+  // DPoP uses Authorization header — no cookies needed.
   withCredentials: false,
 });
 
@@ -76,18 +86,29 @@ function drainQueue(err: unknown, token?: string) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Request interceptor — attach DPoP proof + Authorization
+// Request interceptor — attach DPoP proof + Authorization for API origin only
 // ─────────────────────────────────────────────────────────────────────────────
 
 axiosClient.interceptors.request.use(
   async (config: InternalAxiosRequestConfig) => {
+    const url = buildFullUrl(config);
+
+    // Same-origin scoping: never attach access tokens to non-API hosts.
+    let targetOrigin: string;
+    try {
+      targetOrigin = new URL(url).origin;
+    } catch {
+      return config;
+    }
+    if (targetOrigin !== API_ORIGIN) return config;
+
     const oidcUser = await getUser();
     const accessToken = oidcUser?.access_token;
-
     if (!accessToken) return config;
 
     const keyPair = await getDPoPKeyPair();
-    const url = buildFullUrl(config);
+    if (!keyPair) return config;
+
     const proof = await buildDPoPProof(keyPair, {
       htm: (config.method ?? 'GET').toUpperCase(),
       htu: url,
@@ -108,10 +129,8 @@ axiosClient.interceptors.request.use(
 
 axiosClient.interceptors.response.use(
   (response: AxiosResponse) => {
-    // Capture server-issued nonce for future proofs
     const nonce = response.headers['dpop-nonce'];
     if (nonce) dpopNonce = nonce;
-
     return response.data as never;
   },
   async (error: AxiosError<ApiResponse>) => {
@@ -119,12 +138,9 @@ axiosClient.interceptors.response.use(
       _retry?: boolean;
       _nonceRetry?: boolean;
     };
-
     if (!original) return Promise.reject(error);
 
-    // ── DPoP-Nonce challenge (server wants a nonce in the proof) ─────────────
-    // Duende sends:  401 + WWW-Authenticate: DPoP error="use_dpop_nonce"
-    //                DPoP-Nonce: <nonce>
+    // ── DPoP-Nonce challenge ─────────────────────────────────────────────────
     const wwwAuth = error.response?.headers['www-authenticate'] as string | undefined;
     const serverNonce = error.response?.headers['dpop-nonce'] as string | undefined;
 
@@ -136,7 +152,7 @@ axiosClient.interceptors.response.use(
     ) {
       dpopNonce = serverNonce;
       original._nonceRetry = true;
-      return axiosClient(original); // retry with nonce in proof
+      return axiosClient(original);
     }
 
     // ── Token expired (silent renew) ──────────────────────────────────────────
@@ -205,8 +221,8 @@ export default axiosClient;
 // ─────────────────────────────────────────────────────────────────────────────
 
 function buildFullUrl(config: InternalAxiosRequestConfig): string {
-  const base = (config.baseURL ?? (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:5175')).replace(/\/$/, '');
   const path = config.url ?? '';
-  if (path.startsWith('http')) return path;
+  if (/^https?:\/\//i.test(path)) return path;
+  const base = (config.baseURL ?? API_BASE_URL).replace(/\/$/, '');
   return `${base}${path.startsWith('/') ? '' : '/'}${path}`;
 }

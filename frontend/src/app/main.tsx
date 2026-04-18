@@ -9,22 +9,24 @@ import { router } from './routes/routeTree'; // Import the router from routeTree
 import { queryClient } from '../lib/query/queryClient';
 import { useAuthStore } from '../features/auth/store/authStore';
 
-// Restore OIDC session from oidc-client-ts session storage on app boot.
-// This is async but intentionally fire-and-forget here — the authStore
-// sets isLoading=true initially and flips it false once done, so
-// any protected route can gate on isLoading.
-useAuthStore.getState().initFromSession();
+// Restore OIDC session BEFORE rendering. Otherwise route guards (which read
+// isAuthenticated synchronously) on protected URLs would bounce hard-reload
+// users to /auth/login while the session is still being restored from
+// oidc-client-ts storage.
+async function bootstrap() {
+  await useAuthStore.getState().initFromSession();
 
-// Render the app
-const rootElement = document.getElementById('root')!
-if (!rootElement.innerHTML) {
-  const root = ReactDOM.createRoot(rootElement)
-  root.render(
+  const rootElement = document.getElementById('root')!;
+  if (rootElement.innerHTML) return;
+
+  ReactDOM.createRoot(rootElement).render(
     <StrictMode>
       <QueryClientProvider client={queryClient}>
         <RouterProvider router={router} />
         {import.meta.env.DEV && <ReactQueryDevtools initialIsOpen={false} />}
       </QueryClientProvider>
     </StrictMode>,
-  )
+  );
 }
+
+void bootstrap();

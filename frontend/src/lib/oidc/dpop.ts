@@ -1,51 +1,40 @@
 /**
  * DPoP (Demonstrating Proof-of-Possession) — RFC 9449
  *
+ * This module builds DPoP proof JWTs for API requests. The keypair itself is
+ * managed by oidc-client-ts (`IndexedDbDPoPStore`) so the same key is used
+ * for the token endpoint (binding via cnf.jkt) AND for resource server calls.
+ *
+ * Algorithm: ES256 (ECDSA P-256 / SHA-256)
+ *   We deliberately match oidc-client-ts v3's hard-coded choice. Mixing
+ *   curves between the library (P-256) and our interceptor (P-384) would
+ *   either need separate keys (breaking cnf.jkt binding) or fail signature
+ *   verification at the resource server.
+ *
  * Flow:
- *   1. On first load, generate an ECDSA P-384 CryptoKeyPair via SubtleCrypto.
- *      The private key is non-extractable — it never leaves the browser.
- *   2. Persist the keypair to IndexedDB so it survives page reloads.
- *   3. Before every request, build a signed DPoP proof JWT:
- *        { typ:"dpop+jwt", alg:"ES384", jwk:<publicKeyJwk> }
+ *   1. Library generates P-256 ECDSA non-extractable CryptoKeyPair.
+ *      Private key never leaves the browser (extractable=false).
+ *   2. Persisted in IndexedDB via the library's `IndexedDbDPoPStore`
+ *      (database "oidc", store "dpop").
+ *   3. Before every API request, build a signed DPoP proof JWT:
+ *        { typ:"dpop+jwt", alg:"ES256", jwk:<publicKeyJwk> }
  *        { jti:<uuid>, htm:<METHOD>, htu:<url-no-query>, iat:<now>,
- *          ath:<base64url-sha256(access_token)> }
+ *          ath:<base64url-sha256(access_token)>, nonce?:<server_nonce> }
  *   4. Attach to request:
  *        Authorization: DPoP <access_token>
  *        DPoP: <proof_jwt>
- *
- * Why ES384 instead of ES256?
- *   RFC 9449 recommends ES384 (P-384) for long-lived DPoP keys because
- *   P-384 provides 192-bit security level — well above NIST's post-2030
- *   requirement of ≥ 128 bits while remaining efficiently computable
- *   in browser WebCrypto.
  */
 
-const ALG = 'ES384';
-const CURVE = 'P-384';
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Key generation
-// ─────────────────────────────────────────────────────────────────────────────
-
-export async function generateDPoPKeyPair(): Promise<CryptoKeyPair> {
-  return crypto.subtle.generateKey(
-    {
-      name: 'ECDSA',
-      namedCurve: CURVE,
-    },
-    false,          // non-extractable: private key cannot leave the browser
-    ['sign', 'verify'],
-  );
-}
+const ALG = 'ES256';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // JWK thumbprint (RFC 7638)
-// Used to build cnf.jkt — the binding claim that ties a token to a key.
+// Used to compute cnf.jkt — the binding claim that ties a token to a key.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function computeJwkThumbprint(publicKey: CryptoKey): Promise<string> {
   const jwk = await crypto.subtle.exportKey('jwk', publicKey);
-  // RFC 7638 § 3.2: sorted, minimal set of required members
+  // RFC 7638 § 3.2: sorted, minimal set of required members for EC keys.
   const canonical = JSON.stringify({
     crv: jwk.crv,
     kty: jwk.kty,
@@ -63,7 +52,7 @@ export async function computeJwkThumbprint(publicKey: CryptoKey): Promise<string
 export interface DPoPProofOptions {
   /** HTTP method, e.g. "GET" */
   htm: string;
-  /** Full request URL (query string stripped per RFC 9449 § 4.2) */
+  /** Full request URL (query string + fragment stripped per RFC 9449 § 4.2) */
   htu: string;
   /** Access token — when present, ath = BASE64URL(SHA-256(ascii(token))) */
   accessToken?: string;
@@ -77,7 +66,7 @@ export async function buildDPoPProof(
 ): Promise<string> {
   const publicJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
 
-  // Strip query string and fragment per RFC 9449 § 4.2
+  // Strip query string and fragment per RFC 9449 § 4.2.
   const htu = stripQueryAndFragment(opts.htu);
 
   const header = {
@@ -111,7 +100,7 @@ export async function buildDPoPProof(
   const signingInput = `${headerB64}.${payloadB64}`;
 
   const signature = await crypto.subtle.sign(
-    { name: 'ECDSA', hash: { name: 'SHA-384' } },
+    { name: 'ECDSA', hash: { name: 'SHA-256' } },
     keyPair.privateKey,
     new TextEncoder().encode(signingInput),
   );
@@ -144,7 +133,7 @@ function stripQueryAndFragment(url: string): string {
     u.hash = '';
     return u.toString();
   } catch {
-    // Not a full URL (relative path) — strip manually
+    // Not a full URL (relative path) — strip manually.
     return url.split('?')[0].split('#')[0];
   }
 }
