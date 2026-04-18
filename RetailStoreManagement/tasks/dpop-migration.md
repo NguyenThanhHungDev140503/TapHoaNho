@@ -472,9 +472,34 @@ API khác với plan/docs cũ:
 
 Swashbuckle UI đã chuyển từ Bearer input → OAuth2 Auth Code + PKCE. Tester click "Authorize" trong Swagger sẽ redirect IdentityServer login, nhận access_token. **Nhưng**: Swashbuckle không biết cách tạo DPoP proof JWT → mọi request từ Swagger sẽ 401 với `invalid_dpop_proof`.
 
-Workaround:
-1. Đợi Phase 3 có React client có DPoP — test qua đó
-2. HOẶC tạm để `AllowBearerTokens = true` + trong dev **tạm tắt** `RequireDPoP` ở client config → Swagger test được với plain Bearer
-3. HOẶC cài Swashbuckle plugin DPoP (chưa có official)
+**Đã fix (Code Review C2):** Tạo client riêng `swagger-ui` trong `Config.cs` với `RequireDPoP = false`. Swagger UI dùng client này → nhận plain Bearer token → API accept vì `AllowBearerTokens = true`.
 
-Tôi chọn hướng 1 (giữ `RequireDPoP = true` vì đó mới là mục tiêu). Swagger test chỉ dùng cho endpoints public.
+⚠️ **Phase 4 TODO**: Khi tắt `AllowBearerTokens` thì xóa luôn `swagger-ui` client (hoặc gắn scope "dev" mà API prod refuse).
+
+---
+
+## Code Review Round 2 — Phase 2 (2026-04-18)
+
+Reviewer tìm 2 Critical + 5 Important. Đã fix 4 blockers + 1 minor:
+
+### Critical — Đã fix
+- **C1** `RequireClaim("scope", "retail-api")` fail với RFC 9068 space-separated string → thay bằng `RequireAssertion` split claim.
+- **C2** Swagger dùng `react-dpop` (RequireDPoP=true) → tạo client riêng `swagger-ui` với DPoP=false.
+
+### Important — Đã fix
+- **I4** `AuthController.Login/Logout/Refresh` mint self-signed JWT mà API mới reject + NRE vì SecretKey đã xóa → trả 410 Gone với hướng dẫn dùng IdentityServer.
+- **I5** Cookie code paths đã dead → xóa cùng I4.
+
+### Important — Defer Phase 2.5
+- **I1** Integration test verify DPoP-bound token gửi qua plain Bearer → 401 (verify cnf.jkt enforcement).
+- **I2** Redis swap cho replay cache (production multi-instance).
+- **I3** `RequireHttpsMetadata = false` only in Development env (đã đúng, chỉ note).
+
+### Minor — Đã fix
+- **M4** Expose `WWW-Authenticate` header trong CORS (cho Safari SPA đọc DPoP challenge).
+
+### Minor — Defer
+- **M1** Confirm FallbackPolicy + AllowAnonymous interaction (reviewer đã verify safe).
+- **M2** Custom scheme name (no current issue).
+- **M3** `ValidateAudience = false` justified by current scope-only setup.
+- **M5** Pin package version trong Directory.Packages.props.
