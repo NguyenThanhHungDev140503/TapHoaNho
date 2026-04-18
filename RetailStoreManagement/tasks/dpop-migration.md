@@ -277,10 +277,11 @@ Vì thế Authorization Code flow yêu cầu:
 - [x] **2.2** Cài `Duende.AspNetCore.Authentication.JwtBearer` vào `WebApi.csproj`
 - [x] **2.3** Đổi authentication scheme sang authority-based (`Authority = https://localhost:5001`, `ValidTypes=["at+jwt"]`, `MapInboundClaims=false`)
 - [x] **2.4** Register `ConfigureDPoPTokensForScheme("dpoptokenscheme")` với replay detection + in-memory distributed cache
-- [x] **2.5** Policy `"RetailApi"` (RequireAuthenticatedUser + scope=retail-api) làm FallbackPolicy
+- [x] **2.5** Policy `"RetailApi"` (RequireAuthenticatedUser + scope=retail-api split-aware) làm FallbackPolicy
 - [x] **2.6** Xóa cookie fallback trong `OnMessageReceived` (Program.cs rewrite)
-- [x] **2.7** Mark `AuthController` `[Obsolete]` (full removal ở Phase 4)
-- [x] **2.8** Swagger: Bearer → OAuth2 Auth Code + PKCE (Swashbuckle UI không gen DPoP proof — biết limitation)
+- [x] **2.7** `AuthController.Login/Logout/Refresh` → 410 Gone (Phase 4 xóa hoàn toàn)
+- [x] **2.8** Swagger: Bearer → OAuth2 Auth Code + PKCE với client `swagger-ui` env-gated
+- [x] **2.9** Environment gating: swagger-ui client + AllowBearerTokens chỉ active khi `IsDevelopment()`
 
 ### ⬜ Phase 3: Frontend — Authorization Code + PKCE + DPoP
 - [ ] **3.1** Install `oidc-client-ts`
@@ -472,9 +473,94 @@ API khác với plan/docs cũ:
 
 Swashbuckle UI đã chuyển từ Bearer input → OAuth2 Auth Code + PKCE. Tester click "Authorize" trong Swagger sẽ redirect IdentityServer login, nhận access_token. **Nhưng**: Swashbuckle không biết cách tạo DPoP proof JWT → mọi request từ Swagger sẽ 401 với `invalid_dpop_proof`.
 
-**Đã fix (Code Review C2):** Tạo client riêng `swagger-ui` trong `Config.cs` với `RequireDPoP = false`. Swagger UI dùng client này → nhận plain Bearer token → API accept vì `AllowBearerTokens = true`.
+**Giải pháp:** Tạo client riêng `swagger-ui` (no DPoP) chỉ tồn tại trong Development. Defense in depth 3 lớp ngăn plain-Bearer hoạt động ở Production.
 
-⚠️ **Phase 4 TODO**: Khi tắt `AllowBearerTokens` thì xóa luôn `swagger-ui` client (hoặc gắn scope "dev" mà API prod refuse).
+---
+
+## Environment-Based Gating (Dev vs Prod)
+
+### Mục Tiêu
+
+| Environment | Swagger UI | swagger-ui client | Plain Bearer accepted? |
+|-------------|-----------|-------------------|----------------------|
+| **Development** | ✅ Served | ✅ Tồn tại | ✅ Có (cho test) |
+| **Production** | ❌ 404 | ❌ Không tồn tại | ❌ Refuse 401 |
+
+### Cơ Chế Đọc Environment
+
+```
+.env.secrets (file user, không commit)
+   ASPNETCORE_ENVIRONMENT=Development
+            ↓
+devenv dotenv load → export shell env vars
+            ↓
+direnv kích hoạt khi cd vào project root
+            ↓
+dotnet run kế thừa env vars
+            ↓
+ASP.NET Core đọc tự động vào IHostEnvironment
+            ↓
+builder.Environment.IsDevelopment() → true/false
+```
+
+Để switch Production: đổi `ASPNETCORE_ENVIRONMENT=Production` trong `.env.secrets`, hoặc set trực tiếp khi deploy (Docker env, systemd, k8s ConfigMap).
+
+### Defense in Depth — 3 Lớp Ngăn Bypass
+
+```
+Production (ASPNETCORE_ENVIRONMENT=Production)
+─────────────────────────────────────────────────────
+
+🛡️ Lớp 1 — Pipeline gate (WebApi/Program.cs)
+   if (app.Environment.IsDevelopment())
+       app.UseSwagger();
+   → Production: /swagger trả 404, không có UI nào để abuse
+
+🛡️ Lớp 2 — Client registration gate (IdentityServer/Config.cs)
+   if (isDevelopment) yield return new Client { ClientId = "swagger-ui", ... };
+   → Production: POST /connect/token với client_id=swagger-ui
+                 → IdentityServer trả "invalid_client"
+
+🛡️ Lớp 3 — Token validation gate (WebApi/Program.cs)
+   AllowBearerTokens = builder.Environment.IsDevelopment();
+   → Production: Authorization: Bearer xyz → 401 unconstrained Bearer rejected
+
+➕ Bonus (luôn bật, mọi env):
+   cnf.jkt enforcement: token có cnf.jkt → bắt buộc DPoP proof
+   → Token bị steal, attacker thử Bearer header → vẫn 401
+```
+
+### Files Đã Thay Đổi
+
+| File | Thay đổi |
+|------|---------|
+| `IdentityServer/Config.cs` | `static IEnumerable<Client> Clients` (property) → `static IEnumerable<Client> Clients(bool isDevelopment)` (method). swagger-ui chỉ yield khi dev. |
+| `IdentityServer/Program.cs` | Pass `builder.Environment.IsDevelopment()` vào `Config.Clients(...)`. |
+| `WebApi/Program.cs` | `AllowBearerTokens = builder.Environment.IsDevelopment()`. Log quyết định ở startup. |
+
+### Test Matrix
+
+| Scenario | Dev | Prod |
+|----------|-----|------|
+| Tester mở `/swagger` | ✅ Hoạt động | 404 |
+| Login qua `swagger-ui` client | ✅ Token plain Bearer | `invalid_client` |
+| Plain Bearer → `/api/products` | ✅ 200 OK | 401 |
+| DPoP token + proof → `/api/products` | ✅ 200 OK | ✅ 200 OK |
+| DPoP token KHÔNG có proof → `/api/products` | 401 | 401 |
+
+### Tại Sao Không Đơn Giản Set `ASPNETCORE_ENVIRONMENT` Trong appsettings?
+
+ASP.NET Core đọc env theo thứ tự:
+1. `--environment` command-line arg
+2. `ASPNETCORE_ENVIRONMENT` env var
+3. `DOTNET_ENVIRONMENT` env var
+4. Default: `Production`
+
+`appsettings.json` **KHÔNG** đặt được env name (đó là chicken-and-egg: env name quyết định file `appsettings.{env}.json` nào load). Phải dùng env var hoặc CLI arg.
+
+→ devenv dotenv là cách clean nhất: 1 file `.env.secrets` cho mọi config + secrets.
+
+---
 
 ---
 
@@ -484,7 +570,7 @@ Reviewer tìm 2 Critical + 5 Important. Đã fix 4 blockers + 1 minor:
 
 ### Critical — Đã fix
 - **C1** `RequireClaim("scope", "retail-api")` fail với RFC 9068 space-separated string → thay bằng `RequireAssertion` split claim.
-- **C2** Swagger dùng `react-dpop` (RequireDPoP=true) → tạo client riêng `swagger-ui` với DPoP=false.
+- **C2** Swagger dùng `react-dpop` (RequireDPoP=true) → tạo client riêng `swagger-ui` với DPoP=false. **Sau đó nâng cấp** thành env-gated (xem section "Environment-Based Gating" phía trên) — `swagger-ui` client + `AllowBearerTokens` chỉ active trong Development.
 
 ### Important — Đã fix
 - **I4** `AuthController.Login/Logout/Refresh` mint self-signed JWT mà API mới reject + NRE vì SecretKey đã xóa → trả 410 Gone với hướng dẫn dùng IdentityServer.
