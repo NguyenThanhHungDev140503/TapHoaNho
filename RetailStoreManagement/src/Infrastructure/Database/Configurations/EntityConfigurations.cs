@@ -241,25 +241,3 @@ public class InventoryHistoryEntityConfiguration : IEntityTypeConfiguration<Inve
         builder.HasOne(x => x.User).WithMany().HasForeignKey(x => x.UserId);
     }
 }
-
-public class UserRefreshTokenConfiguration : IEntityTypeConfiguration<UserRefreshToken>
-{
-    public void Configure(EntityTypeBuilder<UserRefreshToken> builder)
-    {
-        builder.ToTable("UserRefreshTokens");
-        
-        builder.HasKey(x => x.Id);
-        builder.Property(x => x.Id).HasColumnName("Id");
-        // UserRefreshTokens có mixed naming: created_at là snake_case, UpdatedAt/DeletedAt là PascalCase
-        builder.Property(x => x.CreatedAt).HasColumnName("created_at");
-        builder.Property(x => x.UpdatedAt).HasColumnName("UpdatedAt");
-        builder.Property(x => x.DeletedAt).HasColumnName("DeletedAt");
-        
-        builder.Property(x => x.UserId).HasColumnName("user_id").IsRequired();
-        builder.Property(x => x.Token).HasColumnName("token").IsRequired();
-        builder.Property(x => x.ExpiresAt).HasColumnName("expires_at").IsRequired();
-        builder.Property(x => x.IsRevoked).HasColumnName("is_revoked").IsRequired();
-        
-        builder.HasOne(x => x.User).WithMany(u => u.UserRefreshTokens).HasForeignKey(x => x.UserId);
-    }
-}
