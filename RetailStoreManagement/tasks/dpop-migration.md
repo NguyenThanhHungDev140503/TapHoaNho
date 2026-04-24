@@ -296,14 +296,26 @@ Vì thế Authorization Code flow yêu cầu:
 - [x] **3.10** Rewrite `authStore.ts` — OIDC user (string role), `initFromSession()`, individual selectors
 - [x] **3.11** Bootstrap fix: `await initFromSession()` trong `main.tsx` trước render
 
-### ⬜ Phase 4: Backend Auth Cleanup
-- [ ] **4.1** Xóa `AuthController` (login/refresh/logout — hiện đã 410 Gone)
-- [ ] **4.2** Xóa `AuthService`, `JwtSettings`, helpers cookies
-- [ ] **4.3** Xóa cookie infrastructure đã không dùng
-- [ ] **4.4** Xóa `JwtSettings` khỏi `appsettings.json`
-- [ ] **4.5** Update CORS — thêm IdentityServer origin nếu cần
-- [ ] **4.6** Redis distributed cache cho replay detection (production)
-- [ ] **4.7** Rate limiting / account lockout (deferred từ Phase 2 review I6)
+### ✅ Phase 4: Backend Auth Cleanup
+- [x] **4.1** Xóa `AuthController` (login/refresh/logout — hiện đã 410 Gone)
+- [x] **4.2** Xóa `AuthService`, `JwtSettings`, helpers cookies
+- [x] **4.3** Xóa cookie infrastructure đã không dùng *(đã xóa từ Phase 2, verify lại ở Phase 4)*
+- [x] **4.4** Xóa `JwtSettings` khỏi `appsettings.json`
+- [x] **4.5** Update CORS — verify không cần thêm IdentityServer origin (WebApi không gọi IDS)
+- [ ] **4.6** Redis distributed cache cho replay detection (production) **[MOVED TO PHASE 5]**
+- [ ] **4.7** Rate limiting / account lockout (deferred từ Phase 2 review I6) **[MOVED TO PHASE 5]**
+
+### ⬜ Phase 5: Production Hardening
+- [ ] **5.1** Redis distributed cache cho DPoP replay detection (multi-instance)
+- [ ] **5.2** Rate limiting login (ASP.NET Core rate limiter middleware)
+- [ ] **5.3** Account lockout — thêm `FailedLoginAttempts` + `LockedUntil` vào `UserEntity` + migration
+- [ ] **5.4** Thay `AddDeveloperSigningCredential()` → `AddSigningCredential()` từ secret store
+- [ ] **5.5** Drop orphan table `user_refresh_tokens` (EF migration)
+- [ ] **5.6** Integration tests: DPoP-bound token qua plain Bearer → 401 (verify `cnf.jkt` enforcement)
+- [ ] **5.7** Unit tests: `buildDPoPProof` + `computeJwkThumbprint` (vitest setup)
+- [ ] **5.8** Rotate Neon DB password (còn trong git history từ round 1)
+- [ ] **5.9** `UseHsts()` / `UseHttpsRedirection()` cho Production pipeline
+- [ ] **5.10** Pin package versions trong `Directory.Packages.props`
 
 ---
 
@@ -705,3 +717,47 @@ d63bf58 fix(frontend): address Phase 3 code review
 b85a08a docs: add DPoP frontend flow document
 cb7056e feat(frontend): Phase 3 — OIDC Authorization Code + PKCE + DPoP
 ```
+
+---
+
+## Phase 4 Implementation Notes (2026-04-25)
+
+### Approach
+
+Pure code cleanup, không thêm tính năng. Các hạng mục production hardening
+(Redis, rate limiting, lockout, signing key) đã tách sang Phase 5.
+
+### Files đã xóa
+
+- `WebApi/Controllers/AuthController.cs`
+- `WebApi/Models/LegacyAuthModels.cs`
+- `Application/Features/Auth/` (toàn bộ folder)
+- `Infrastructure/Services/AuthService.cs`
+- `Domain/Entities/UserRefreshToken.cs`
+
+### Files mới
+
+- `WebApi/Controllers/SetupController.cs` — bootstrap endpoint `POST /api/setup/admin`
+- `Application/Features/Setup/Commands/SetupAdminCommand.cs`
+- `Application/Features/Setup/Dtos/SetupAdminResponse.cs`
+- `Application/Features/Setup/Handlers/SetupAdminCommandHandler.cs`
+
+### Files sửa
+
+| File | Thay đổi |
+|------|---------|
+| `Infrastructure/DependencyInjection.cs` | Bỏ `IAuthService` registration |
+| `Infrastructure/Database/ApplicationDbContext.cs` | Bỏ `DbSet<UserRefreshToken>`, thêm comment orphan table |
+| `Infrastructure/Database/Configurations/EntityConfigurations.cs` | Bỏ `UserRefreshTokenConfiguration` |
+| `Domain/Entities/UserEntity.cs` | Bỏ navigation `UserRefreshTokens` |
+| `WebApi/appsettings.json` | Xóa section `JwtSettings`, thêm `IdentityServer.Authority` |
+| `WebApi/appsettings.Development.json` | Xóa section `JwtSettings` |
+
+### Quyết định thiết kế
+
+| Quyết định | Lý do |
+|-----------|-------|
+| Tách `SetupController` riêng thay vì gộp vào `AuthController` | Phân biệt rõ bootstrap tooling vs runtime auth |
+| `SetupAdminResponse` không chứa token | Sau setup, client redirect đến IdentityServer login bình thường |
+| Giữ table `user_refresh_tokens` (orphan) | Rollback an toàn, drop migration thuộc Phase 5 |
+| Không viết unit test | Ngoài scope cleanup phase, defer Phase 5 |
