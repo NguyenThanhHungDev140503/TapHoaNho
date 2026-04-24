@@ -25,7 +25,9 @@ public class ApplicationDbContext : DbContext
     public DbSet<InventoryEntity> Inventory => Set<InventoryEntity>();
     public DbSet<InventoryHistoryEntity> InventoryHistories => Set<InventoryHistoryEntity>();
     public DbSet<PromotionEntity> Promotions => Set<PromotionEntity>();
-    public DbSet<UserRefreshToken> UserRefreshTokens => Set<UserRefreshToken>();
+    // NOTE: Table `user_refresh_tokens` còn tồn tại trên Neon DB nhưng KHÔNG được map.
+    // Đây là orphan table sau khi cleanup legacy JWT auth ở Phase 4.
+    // Drop table bằng EF migration ở Phase 5.
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
