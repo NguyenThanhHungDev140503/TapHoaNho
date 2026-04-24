@@ -24,5 +24,4 @@ public class UserEntity : BaseEntity<int>
 
     // Navigation properties
     public virtual ICollection<OrderEntity> Orders { get; set; } = [];
-    public virtual ICollection<UserRefreshToken> UserRefreshTokens { get; set; } = [];
 }
