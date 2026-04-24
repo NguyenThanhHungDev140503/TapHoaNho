@@ -1,4 +1,3 @@
-using Application.Features.Auth.Services;
 using Domain.Repositories;
 using Domain.SeedWork;
 using Infrastructure.Database;
@@ -37,7 +36,6 @@ public static class DependencyInjection
         services.AddScoped<IUserRepository, UserRepository>();
 
         // Services
-        services.AddScoped<IAuthService, AuthService>();
         services.AddScoped<Application.Abstractions.Services.IPasswordHasher, PasswordHasher>();
         services.AddScoped<Application.Common.Interfaces.IImageKitService, ImageKitService>();
 
