@@ -1,4 +1,6 @@
+using System.Security.Cryptography.X509Certificates;
 using IdentityServer;
+using IdentityServer.Extensions;
 using IdentityServer.Services;
 using Infrastructure.Database;
 using Microsoft.EntityFrameworkCore;
@@ -12,7 +14,10 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
 
 builder.Services.AddRazorPages();
 
-builder.Services.AddIdentityServer(options =>
+builder.Services.AddScoped<AccountLockoutService>();
+builder.Services.AddLoginRateLimiting();
+
+var idsBuilder = builder.Services.AddIdentityServer(options =>
 {
     options.Events.RaiseErrorEvents = true;
     options.Events.RaiseInformationEvents = true;
@@ -25,15 +30,32 @@ builder.Services.AddIdentityServer(options =>
 .AddInMemoryIdentityResources(Config.IdentityResources)
 .AddInMemoryApiScopes(Config.ApiScopes)
 .AddInMemoryClients(Config.Clients(builder.Environment.IsDevelopment()))
-.AddProfileService<CustomProfileService>()
-// Dev-only signing credential. Production MUST use AddSigningCredential()
-// with a persistent key from a secret store (Azure Key Vault, HashiCorp Vault, etc.).
-.AddDeveloperSigningCredential();
+.AddProfileService<CustomProfileService>();
+
+if (builder.Environment.IsDevelopment())
+{
+    idsBuilder.AddDeveloperSigningCredential();
+}
+else
+{
+    var keyPath = builder.Configuration["IdentityServer:SigningCredential:KeyPath"]
+        ?? throw new InvalidOperationException(
+            "IdentityServer:SigningCredential:KeyPath is required in production");
+    var keyPassword = builder.Configuration["IdentityServer:SigningCredential:Password"];
+    idsBuilder.AddSigningCredential(X509CertificateLoader.LoadPkcs12FromFile(keyPath, keyPassword));
+}
 
 var app = builder.Build();
 
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHsts();
+    app.UseHttpsRedirection();
+}
+
 app.UseStaticFiles();
 app.UseRouting();
+app.UseRateLimiter();
 app.UseIdentityServer();
 app.UseAuthorization();
 app.MapRazorPages();

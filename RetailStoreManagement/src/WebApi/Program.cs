@@ -3,6 +3,7 @@ using Duende.AspNetCore.Authentication.JwtBearer.DPoP;
 using Infrastructure;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.OpenApi.Models;
+using WebApi.Extensions;
 using WebApi.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -54,6 +55,7 @@ builder.Services
 // ================================
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
+builder.Services.AddSetupRateLimiting();
 
 // ================================
 // Controllers
@@ -130,9 +132,25 @@ logger.LogInformation(
     allowBearerTokens, environment);
 
 // Required by DPoP replay protection — stores jti of recently-seen proofs.
-// In-memory is acceptable for a single-instance dev deployment. For multi-
-// instance production, swap in Redis/SQL.
-builder.Services.AddDistributedMemoryCache();
+// Dev: in-memory cache. Production: Redis (if connection string configured).
+var redisConnectionString = builder.Configuration["Redis:ConnectionString"];
+if (!string.IsNullOrEmpty(redisConnectionString))
+{
+    var configOptions = StackExchange.Redis.ConfigurationOptions.Parse(redisConnectionString);
+    var instanceName = builder.Configuration["Redis:InstanceName"] ?? "TapHoaNho";
+
+    builder.Services.AddStackExchangeRedisCache(options =>
+    {
+        options.ConfigurationOptions = configOptions;
+        options.InstanceName = instanceName;
+    });
+    logger.LogInformation("DPoP replay cache: Redis (instance={Instance})", instanceName);
+}
+else
+{
+    builder.Services.AddDistributedMemoryCache();
+    logger.LogInformation("DPoP replay cache: InMemory");
+}
 
 builder.Services.AddAuthorization(options =>
 {
@@ -244,7 +262,14 @@ if (app.Environment.IsDevelopment())
     });
 }
 
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHsts();
+    app.UseHttpsRedirection();
+}
+
 app.UseCors(MyAllowSpecificOrigins);
+app.UseRateLimiter();
 app.UseExceptionHandler();
 app.UseAuthentication();
 app.UseAuthorization();

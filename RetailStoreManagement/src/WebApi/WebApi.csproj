@@ -13,8 +13,9 @@
     </ItemGroup>
 
     <ItemGroup>
-        <PackageReference Include="Duende.AspNetCore.Authentication.JwtBearer" Version="1.0.2" />
-        <PackageReference Include="Swashbuckle.AspNetCore" Version="7.2.0" />
+        <PackageReference Include="Duende.AspNetCore.Authentication.JwtBearer" />
+        <PackageReference Include="Swashbuckle.AspNetCore" />
+        <PackageReference Include="Microsoft.Extensions.Caching.StackExchangeRedis" />
     </ItemGroup>
 
 </Project>

@@ -305,17 +305,17 @@ Vì thế Authorization Code flow yêu cầu:
 - [ ] **4.6** Redis distributed cache cho replay detection (production) **[MOVED TO PHASE 5]**
 - [ ] **4.7** Rate limiting / account lockout (deferred từ Phase 2 review I6) **[MOVED TO PHASE 5]**
 
-### ⬜ Phase 5: Production Hardening
-- [ ] **5.1** Redis distributed cache cho DPoP replay detection (multi-instance)
-- [ ] **5.2** Rate limiting login (ASP.NET Core rate limiter middleware)
-- [ ] **5.3** Account lockout — thêm `FailedLoginAttempts` + `LockedUntil` vào `UserEntity` + migration
-- [ ] **5.4** Thay `AddDeveloperSigningCredential()` → `AddSigningCredential()` từ secret store
-- [ ] **5.5** Drop orphan table `user_refresh_tokens` (EF migration)
-- [ ] **5.6** Integration tests: DPoP-bound token qua plain Bearer → 401 (verify `cnf.jkt` enforcement)
-- [ ] **5.7** Unit tests: `buildDPoPProof` + `computeJwkThumbprint` (vitest setup)
-- [ ] **5.8** Rotate Neon DB password (còn trong git history từ round 1)
-- [ ] **5.9** `UseHsts()` / `UseHttpsRedirection()` cho Production pipeline
-- [ ] **5.10** Pin package versions trong `Directory.Packages.props`
+### ✅ Phase 5: Production Hardening
+- [x] **5.1** Redis distributed cache cho DPoP replay detection (multi-instance)
+- [x] **5.2** Rate limiting login (ASP.NET Core rate limiter middleware)
+- [x] **5.3** Account lockout — thêm `FailedLoginAttempts` + `LockedUntil` vào `UserEntity` + migration
+- [x] **5.4** Thay `AddDeveloperSigningCredential()` → `AddSigningCredential()` từ secret store
+- [x] **5.5** Drop orphan table `user_refresh_tokens` (EF migration)
+- [x] **5.6** Integration tests: DPoP-bound token qua plain Bearer → 401 (verify `cnf.jkt` enforcement)
+- [x] **5.7** Unit tests: `buildDPoPProof` + `computeJwkThumbprint` (vitest setup)
+- [x] **5.8** Rotate Neon DB password (còn trong git history từ round 1) — documented procedure
+- [x] **5.9** `UseHsts()` / `UseHttpsRedirection()` cho Production pipeline
+- [x] **5.10** Pin package versions trong `Directory.Packages.props`
 
 ---
 
@@ -761,3 +761,66 @@ Pure code cleanup, không thêm tính năng. Các hạng mục production harden
 | `SetupAdminResponse` không chứa token | Sau setup, client redirect đến IdentityServer login bình thường |
 | Giữ table `user_refresh_tokens` (orphan) | Rollback an toàn, drop migration thuộc Phase 5 |
 | Không viết unit test | Ngoài scope cleanup phase, defer Phase 5 |
+
+---
+
+## Phase 5 Implementation Notes (2026-04-25)
+
+### Approach
+
+TDD applied to testable items (5.2, 5.3, 5.6). Configuration/operational items (5.1, 5.4, 5.5, 5.8, 5.9, 5.10) implemented directly.
+
+### Files mới
+
+- `Directory.Packages.props` — Central Package Management, all package versions pinned
+- `src/IdentityServer/Services/AccountLockoutService.cs` — Lockout logic (5 failed attempts → 15min lock)
+- `src/IdentityServer/Extensions/RateLimitingExtensions.cs` — "LoginPolicy" (10 req/min, IP-based)
+- `src/WebApi/Extensions/RateLimitingExtensions.cs` — "SetupPolicy" (5 req/min, IP-based)
+- `src/Infrastructure/Migrations/20260425_DropUserRefreshTokensTable.cs` — Raw SQL DROP TABLE
+- `tests/Tests.Unit/IdentityServer/AccountLockoutServiceTests.cs` — 10 tests (TDD RED→GREEN)
+- `tests/Tests.Unit/IdentityServer/RateLimitPolicyTests.cs` — 1 test
+- `tests/Tests.Unit/WebApi/RateLimitPolicyTests.cs` — 1 test
+- `tests/Tests.Unit/WebApi/DPoPEnforcementTests.cs` — 2 tests (AllowBearerTokens config logic)
+
+### Files sửa
+
+| File | Thay đổi |
+|------|---------|
+| `Domain/Entities/UserEntity.cs` | Thêm `FailedLoginAttempts`, `LockedUntil` |
+| `Infrastructure/Database/Configurations/EntityConfigurations.cs` | snake_case column mappings cho lockout fields |
+| `IdentityServer/Program.cs` | Env-gated signing credential, rate limiter, HSTS/HTTPS, AccountLockoutService DI |
+| `IdentityServer/Pages/Account/Login/Index.cshtml.cs` | Inject lockout service, check lockout before password, record failures/successes, `[EnableRateLimiting("LoginPolicy")]` |
+| `IdentityServer/appsettings.json` | Thêm `IdentityServer:SigningCredential` section |
+| `WebApi/Program.cs` | Redis/in-memory cache swap, rate limiter, HSTS/HTTPS |
+| `WebApi/WebApi.csproj` | Thêm `Microsoft.Extensions.Caching.StackExchangeRedis` |
+| `WebApi/appsettings.json` | Thêm `Redis:ConnectionString` |
+| `WebApi/Controllers/SetupController.cs` | `[EnableRateLimiting("SetupPolicy")]` |
+| `tests/Tests.Unit/Tests.Unit.csproj` | Thêm WebApi project reference, strip Version attributes (CPM) |
+| All 6 .csproj files | Strip `Version="..."` (Central Package Management) |
+
+### Quyết định thiết kế
+
+| Quyết định | Lý do |
+|-----------|-------|
+| Max 5 failed attempts, 15min lockout | Cân bằng giữa bảo vệ brute-force và UX |
+| Reset `FailedLoginAttempts` sau lockout | Cho phép attacker thử lại 5 lần mới sau mỗi lockout window |
+| Fixed window rate limiter (không sliding window) | Đơn giản, đủ cho mục đích chống brute-force |
+| IP-based partition key | Không cần username lookup, giảm load DB |
+| Redis cache conditional (connection string present) | Dev dùng in-memory, prod dùng Redis — không cần thay đổi code |
+| `X509CertificateLoader.LoadPkcs12FromFile` thay vì `new X509Certificate2(path, pw)` | .NET 10 deprecate constructor, dùng API mới |
+| Manual migration cho orphan table | Table không trong EF model, `dotnet ef migrations` tạo migration rỗng |
+
+### 5.8 — Rotate Neon DB Password
+
+**Quy trình:**
+1. Đăng nhập Neon Console → Settings → Connection String
+2. Reset password cho role chính
+3. Cập nhật connection string trong:
+   - `IdentityServer/appsettings.json` → `ConnectionStrings:DefaultConnection`
+   - `WebApi/appsettings.json` → `ConnectionStrings:DefaultConnection`
+   - `.env.secrets` (devenv dotenv)
+4. Restart cả hai service
+5. Verify: `devenv db-check` kết nối thành công
+
+**Lưu ý:** Password cũ vẫn còn trong git history (commit round 1). Nếu DB chứa sensitive data, cân nhắc rotate thêm password cho DB user Neon.
+

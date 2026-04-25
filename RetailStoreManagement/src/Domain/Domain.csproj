@@ -9,7 +9,7 @@
 
     <ItemGroup>
         <!-- Cần full EF Core package để có IDbContextTransaction -->
-        <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.1" />
+        <PackageReference Include="Microsoft.EntityFrameworkCore" />
     </ItemGroup>
 
 </Project>

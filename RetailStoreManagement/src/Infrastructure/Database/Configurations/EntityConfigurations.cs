@@ -24,6 +24,8 @@ public class UserEntityConfiguration : IEntityTypeConfiguration<UserEntity>
         builder.Property(x => x.Password).HasColumnName("password").HasMaxLength(255).IsRequired();
         builder.Property(x => x.FullName).HasColumnName("full_name").HasMaxLength(100);
         builder.Property(x => x.Role).HasColumnName("role").IsRequired();
+        builder.Property(x => x.FailedLoginAttempts).HasColumnName("failed_login_attempts").HasDefaultValue(0);
+        builder.Property(x => x.LockedUntil).HasColumnName("locked_until");
     }
 }
 
