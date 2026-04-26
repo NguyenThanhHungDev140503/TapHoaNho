@@ -141,11 +141,6 @@ public class CustomProfileServiceTests : IDisposable
     [Fact]
     public async Task IsActive_DeletedUser_SetsIsActiveFalse()
     {
-        // NOTE: soft-delete is tracked via DeletedAt, but there is no global
-        // query filter applied in this project — the service does a plain
-        // AnyAsync(u => u.Id == id). A soft-deleted user still exists in the
-        // table, so IsActive stays true until the row is hard-deleted or a
-        // query filter is added. This test documents the CURRENT behavior.
         var user = new UserEntity
         {
             Id = 11,
@@ -160,14 +155,33 @@ public class CustomProfileServiceTests : IDisposable
         var context = BuildIsActiveContext(subjectId: "11");
         await _sut.IsActiveAsync(context);
 
-        // Current implementation: no soft-delete filter → user is still "active"
-        context.IsActive.Should().BeTrue();
+        context.IsActive.Should().BeFalse();
     }
 
     [Fact]
     public async Task IsActive_UserNotFound_SetsIsActiveFalse()
     {
         var context = BuildIsActiveContext(subjectId: "999");
+        await _sut.IsActiveAsync(context);
+
+        context.IsActive.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task IsActive_LockedUser_SetsIsActiveFalse()
+    {
+        var user = new UserEntity
+        {
+            Id = 12,
+            Username = "locked",
+            Password = "hash",
+            Role = UserRole.Staff,
+            LockedUntil = DateTimeOffset.UtcNow.AddHours(1)
+        };
+        _db.Users.Add(user);
+        await _db.SaveChangesAsync();
+
+        var context = BuildIsActiveContext(subjectId: "12");
         await _sut.IsActiveAsync(context);
 
         context.IsActive.Should().BeFalse();

@@ -1,7 +1,9 @@
+using System.ComponentModel.DataAnnotations;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 namespace Infrastructure.Migrations;
 
+[Migration("20260425_DropUserRefreshTokensTable")]
 public partial class DropUserRefreshTokensTable : Migration
 {
     protected override void Up(MigrationBuilder migrationBuilder)

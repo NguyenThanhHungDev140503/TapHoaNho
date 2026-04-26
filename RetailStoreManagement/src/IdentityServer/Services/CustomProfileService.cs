@@ -53,10 +53,11 @@ public class CustomProfileService : IProfileService
         }
 
         // Projection to avoid loading full entity for every token request
-        var exists = await _dbContext.Users
+        var isActive = await _dbContext.Users
             .AsNoTracking()
-            .AnyAsync(u => u.Id == id);
-
-        context.IsActive = exists;
+            .AnyAsync(u => u.Id == id
+                && u.DeletedAt == null
+                && (u.LockedUntil == null || u.LockedUntil <= DateTimeOffset.UtcNow));
+        context.IsActive = isActive;
     }
 }

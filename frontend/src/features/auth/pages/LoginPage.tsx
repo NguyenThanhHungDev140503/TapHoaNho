@@ -11,6 +11,26 @@ import { useNavigate } from '@tanstack/react-router';
 import { signinRedirect } from '../../../lib/oidc/userManager';
 import { useIsAuthenticated } from '../store/authStore';
 
+/**
+ * Validates returnTo URL to prevent open redirect attacks.
+ * Allows: relative paths (/dashboard), same-origin URLs (https://localhost:5173/orders)
+ * Blocks: absolute URLs to external domains (https://evil.com), protocol-relative (//evil.com)
+ */
+function isAllowedReturnTo(returnTo: string | null): boolean {
+  if (!returnTo) return false;
+  // Block protocol-relative URLs
+  if (returnTo.startsWith('//')) return false;
+  // Allow relative paths
+  if (returnTo.startsWith('/')) return true;
+  // Allow same-origin absolute URLs
+  try {
+    const url = new URL(returnTo);
+    return url.origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
 export const LoginPage: React.FC = () => {
   const isAuthenticated = useIsAuthenticated();
   const navigate = useNavigate();
@@ -22,8 +42,9 @@ export const LoginPage: React.FC = () => {
     }
 
     // Save intended destination so callback page can redirect back
+    // Only allow relative paths or same-origin URLs to prevent open redirect
     const returnTo = new URLSearchParams(window.location.search).get('returnTo');
-    if (returnTo) {
+    if (isAllowedReturnTo(returnTo)) {
       sessionStorage.setItem('oidc_return_to', returnTo);
     }
 
