@@ -17,6 +17,16 @@ builder.Services.AddRazorPages();
 builder.Services.AddScoped<AccountLockoutService>();
 builder.Services.AddLoginRateLimiting();
 
+var configuredClients = builder.Configuration
+    .GetSection("IdentityServer:Clients")
+    .Get<List<IdentityServerClientOptions>>()
+    ?? throw new InvalidOperationException("IdentityServer:Clients configuration section is missing.");
+
+if (configuredClients.Count == 0)
+{
+    throw new InvalidOperationException("IdentityServer:Clients must contain at least one configured client.");
+}
+
 var idsBuilder = builder.Services.AddIdentityServer(options =>
 {
     options.Events.RaiseErrorEvents = true;
@@ -29,7 +39,7 @@ var idsBuilder = builder.Services.AddIdentityServer(options =>
 })
 .AddInMemoryIdentityResources(Config.IdentityResources)
 .AddInMemoryApiScopes(Config.ApiScopes)
-.AddInMemoryClients(Config.Clients(builder.Environment.IsDevelopment()))
+.AddInMemoryClients(Config.Clients(configuredClients, builder.Environment.IsDevelopment()))
 .AddProfileService<CustomProfileService>();
 
 if (builder.Environment.IsDevelopment())

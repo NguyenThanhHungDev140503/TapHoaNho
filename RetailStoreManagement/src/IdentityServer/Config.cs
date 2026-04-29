@@ -2,6 +2,28 @@ using Duende.IdentityServer.Models;
 
 namespace IdentityServer;
 
+public sealed class IdentityServerClientOptions
+{
+    public string ClientId { get; init; } = string.Empty;
+    public string? ClientName { get; init; }
+    public string? ClientUri { get; init; }
+    public List<string> AllowedGrantTypes { get; init; } = [];
+    public bool RequirePkce { get; init; }
+    public bool RequireClientSecret { get; init; }
+    public bool RequireDPoP { get; init; }
+    public List<string> RedirectUris { get; init; } = [];
+    public List<string> PostLogoutRedirectUris { get; init; } = [];
+    public List<string> AllowedCorsOrigins { get; init; } = [];
+    public List<string> AllowedScopes { get; init; } = [];
+    public bool AllowOfflineAccess { get; init; }
+    public int AccessTokenLifetime { get; init; }
+    public string? RefreshTokenExpiration { get; init; }
+    public string? RefreshTokenUsage { get; init; }
+    public int SlidingRefreshTokenLifetime { get; init; }
+    public int AbsoluteRefreshTokenLifetime { get; init; }
+    public bool DevelopmentOnly { get; init; }
+}
+
 public static class Config
 {
     public static IEnumerable<IdentityResource> IdentityResources =>
@@ -23,89 +45,96 @@ public static class Config
     /// making plain-Bearer tokens useless even if this client somehow exists.
     /// Defense in depth.
     /// </summary>
+    /// <param name="clientOptions">Configured clients from <c>IdentityServer:Clients</c>.</param>
     /// <param name="isDevelopment">
     /// Value of <c>IHostEnvironment.IsDevelopment()</c> — derived from
     /// ASPNETCORE_ENVIRONMENT which devenv loads from .env.secrets.
     /// </param>
-    public static IEnumerable<Client> Clients(bool isDevelopment)
+    public static IEnumerable<Client> Clients(IEnumerable<IdentityServerClientOptions> clientOptions, bool isDevelopment)
     {
-        yield return new Client
+        foreach (var option in clientOptions)
         {
-            ClientId = "react-dpop",
-            ClientName = "React DPoP Client",
-            ClientUri = "http://localhost:5173",
-
-            // OAuth 2.1: Authorization Code only + PKCE required
-            AllowedGrantTypes = GrantTypes.Code,
-            RequirePkce = true,
-            RequireClientSecret = false, // public SPA client
-
-            // DPoP: sender-constrained tokens (RFC 9449)
-            RequireDPoP = true,
-
-            RedirectUris =
+            if (option.DevelopmentOnly && !isDevelopment)
             {
-                "http://localhost:5173/callback"
-            },
-            PostLogoutRedirectUris =
-            {
-                "http://localhost:5173"
-            },
-            AllowedCorsOrigins =
-            {
-                "http://localhost:5173"
-            },
+                continue;
+            }
 
-            AllowedScopes =
-            {
-                "openid",
-                "profile",
-                "retail-api",
-                "offline_access"
-            },
-
-            AllowOfflineAccess = true,
-            AccessTokenLifetime = 900, // 15 min — DPoP lets us keep tokens short
-            RefreshTokenExpiration = TokenExpiration.Sliding,
-            RefreshTokenUsage = TokenUsage.OneTimeOnly,
-            SlidingRefreshTokenLifetime = 60 * 60 * 24 * 7,  // 7 days
-            AbsoluteRefreshTokenLifetime = 60 * 60 * 24 * 30 // 30 days cap
-        };
-
-        // Swagger UI testing client — Development ONLY.
-        // In Production this client does not exist, so /connect/authorize
-        // with client_id=swagger-ui returns "invalid_client".
-        if (isDevelopment)
-        {
-            yield return new Client
-            {
-                ClientId = "swagger-ui",
-                ClientName = "Swagger UI (dev testing)",
-
-                AllowedGrantTypes = GrantTypes.Code,
-                RequirePkce = true,
-                RequireClientSecret = false,
-                RequireDPoP = false, // Swashbuckle can't generate proofs
-
-                RedirectUris =
-                {
-                    "https://localhost:5175/swagger/oauth2-redirect.html",
-                    "http://localhost:5175/swagger/oauth2-redirect.html"
-                },
-                AllowedCorsOrigins =
-                {
-                    "https://localhost:5175",
-                    "http://localhost:5175"
-                },
-                AllowedScopes =
-                {
-                    "openid",
-                    "profile",
-                    "retail-api"
-                },
-
-                AccessTokenLifetime = 3600 // 1h for easier debugging
-            };
+            yield return MapClient(option);
         }
+    }
+
+    private static Client MapClient(IdentityServerClientOptions option)
+    {
+        if (string.IsNullOrWhiteSpace(option.ClientId))
+        {
+            throw new InvalidOperationException("IdentityServer client configuration must specify clientId.");
+        }
+
+        return new Client
+        {
+            ClientId = option.ClientId,
+            ClientName = option.ClientName,
+            ClientUri = option.ClientUri,
+            AllowedGrantTypes = MapAllowedGrantTypes(option.AllowedGrantTypes, option.ClientId),
+            RequirePkce = option.RequirePkce,
+            RequireClientSecret = option.RequireClientSecret,
+            RequireDPoP = option.RequireDPoP,
+            RedirectUris = option.RedirectUris,
+            PostLogoutRedirectUris = option.PostLogoutRedirectUris,
+            AllowedCorsOrigins = option.AllowedCorsOrigins,
+            AllowedScopes = option.AllowedScopes,
+            AllowOfflineAccess = option.AllowOfflineAccess,
+            AccessTokenLifetime = option.AccessTokenLifetime,
+            RefreshTokenExpiration = MapRefreshTokenExpiration(option.RefreshTokenExpiration, option.ClientId),
+            RefreshTokenUsage = MapRefreshTokenUsage(option.RefreshTokenUsage, option.ClientId),
+            SlidingRefreshTokenLifetime = option.SlidingRefreshTokenLifetime,
+            AbsoluteRefreshTokenLifetime = option.AbsoluteRefreshTokenLifetime
+        };
+    }
+
+    private static ICollection<string> MapAllowedGrantTypes(IEnumerable<string> configuredGrantTypes, string clientId)
+    {
+        var grantTypes = configuredGrantTypes.ToList();
+        if (grantTypes.Count == 0)
+        {
+            throw new InvalidOperationException($"IdentityServer client '{clientId}' must configure at least one allowedGrantTypes value.");
+        }
+
+        if (grantTypes.Any(grant => !string.Equals(grant, "code", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException($"IdentityServer client '{clientId}' has unsupported allowedGrantTypes. Only 'code' is supported.");
+        }
+
+        return GrantTypes.Code;
+    }
+
+    private static TokenExpiration MapRefreshTokenExpiration(string? configuredValue, string clientId)
+    {
+        if (string.IsNullOrWhiteSpace(configuredValue))
+        {
+            return TokenExpiration.Absolute;
+        }
+
+        if (Enum.TryParse<TokenExpiration>(configuredValue, ignoreCase: true, out var parsed))
+        {
+            return parsed;
+        }
+
+        throw new InvalidOperationException($"IdentityServer client '{clientId}' has invalid refreshTokenExpiration '{configuredValue}'.");
+    }
+
+    private static TokenUsage MapRefreshTokenUsage(string? configuredValue, string clientId)
+    {
+        if (string.IsNullOrWhiteSpace(configuredValue))
+        {
+            return TokenUsage.ReUse;
+        }
+
+        if (Enum.TryParse<TokenUsage>(configuredValue, ignoreCase: true, out var parsed))
+        {
+            return parsed;
+        }
+
+        throw new InvalidOperationException($"IdentityServer client '{clientId}' has invalid refreshTokenUsage '{configuredValue}'.");
     }
 }
