@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Communication
+
+- User prefers Vietnamese for explanations and discussions
+
 ## Commands
 
 ### Frontend (`frontend/`)
@@ -96,6 +100,7 @@ Feature-Sliced Design (FSD). Each feature under `src/features/<name>/` has `page
 - **Distributed replay cache** — DPoP jti replay detection uses `AddDistributedMemoryCache()`. For multi-instance production this must be swapped to Redis.
 - **EF naming** — `EFCore.NamingConventions` maps PascalCase C# properties to `snake_case` PostgreSQL columns automatically.
 - **Database** — hosted on Neon (serverless PostgreSQL). Connection string in `appsettings.json` uses `SSL Mode=Require`. Actual credentials come from `.env.secrets` (loaded by devenv dotenv, never committed).
+- **Environment** — `ASPNETCORE_ENVIRONMENT` in `.env.secrets` controls Development/Production. Loaded by devenv, determines `isDevelopment` in `Config.Clients()`.
 - **React Compiler** — `babel-plugin-react-compiler` is enabled in the Vite config. This auto-memoizes components; manual `useMemo`/`useCallback` should only be added when the compiler cannot handle a case.
 - **Yarn Berry** (v4) with `packageManager` field in `package.json`. Use `yarn` not `npm`.
 - **Pre-commit hook** — devenv registers a git pre-commit hook that runs `yarn lint`. Lint must pass before commits are allowed.

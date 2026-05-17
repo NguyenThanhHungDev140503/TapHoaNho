@@ -16,7 +16,7 @@ After:   Frontend → IdentityServer (Auth Code + PKCE) → DPoP Access Token �
 **Stack:**
 - IdentityServer: Duende IdentityServer 7.0 (port 5001)
 - API: Duende.IdentityModel để validate DPoP proof
-- Frontend: oidc-client-ts + SubtleCrypto (ECDSA P-384)
+- Frontend: oidc-client-ts + SubtleCrypto (ECDSA P-256 / ES256)
 
 ---
 
@@ -41,11 +41,11 @@ Frontend (ở Phase 3) sẽ:
 
 ```typescript
 const keyPair = await crypto.subtle.generateKey(
-  { name: "ECDSA", namedCurve: "P-384" },
+  { name: "ECDSA", namedCurve: "P-256" },
   false,                  // extractable = false: JS không đọc được raw bytes
   ["sign"]
 );
-// Lưu vào IndexedDB để persist qua page refresh
+// oidc-client-ts IndexedDbDPoPStore tự lazy-generate + persist (database:"oidc", store:"dpop")
 ```
 
 **Điểm quan trọng:** Private key là `CryptoKey` object **non-extractable**. Ngay cả XSS cũng không export được ra bytes — chỉ gọi `sign()` được.
@@ -55,14 +55,14 @@ const keyPair = await crypto.subtle.generateKey(
 Mỗi request đến IdentityServer, client tạo một DPoP proof JWT mới:
 
 ```
-Header:  { typ: "dpop+jwt", alg: "ES384", jwk: <publicKey-JWK> }
+Header:  { typ: "dpop+jwt", alg: "ES256", jwk: <publicKey-JWK> }
 Payload: {
   jti: "<random-uuid>",   // unique mỗi proof → chống replay
   htm: "POST",             // HTTP method
   htu: "https://localhost:5001/connect/token",
   iat: <timestamp>
 }
-Signature: ECDSA-sign bằng privateKey
+Signature: ECDSA-sign bằng privateKey (ES256/P-256)
 ```
 
 Request:
@@ -147,13 +147,16 @@ WebApi (Phase 2) sẽ:
 | Component | Trạng thái | Ghi chú |
 |-----------|-----------|---------|
 | IdentityServer `RequireDPoP = true` | ✅ | Client `react-dpop` bắt buộc DPoP |
-| `AddDeveloperSigningCredential()` | ✅ | RSA key sign access_token (dev only) |
-| DPoP proof validation trong WebApi | ⬜ | Phase 2 |
-| Keypair generate ở Frontend | ⬜ | Phase 3 |
-| IndexedDB persistence | ⬜ | Phase 3 |
-| Axios DPoP interceptor | ⬜ | Phase 3 |
+| `AddDeveloperSigningCredential()` | ✅ | Dev: auto tempkey; Prod: X509 từ config |
+| DPoP proof validation trong WebApi | ✅ | Duende.AspNetCore.Authentication.JwtBearer 1.0.2 |
+| Keypair generate ở Frontend | ✅ | ES256/P-256, non-extractable |
+| IndexedDB persistence | ✅ | oidc-client-ts IndexedDbDPoPStore |
+| Axios DPoP interceptor | ✅ | Same-origin scoping, nonce retry, silent renew |
+| Account lockout | ✅ | 5 failed → 15min lock |
+| Rate limiting | ✅ | Login: 10/min, Setup: 5/min |
+| DPoP replay detection | ✅ | In-memory (dev) / Redis (prod) |
 
-**Lưu ý:** Hiện tại chưa test được DPoP end-to-end. IdentityServer sẽ reject mọi token request vì client chưa gửi DPoP proof. Phải hoàn tất Phase 3 mới chạy được flow đầu-cuối.
+**Tất cả Phase 0–5 đã hoàn thành.** Xem section "Setup Guide" phía dưới để chạy end-to-end.
 
 ---
 
@@ -270,9 +273,9 @@ Vì thế Authorization Code flow yêu cầu:
 - [x] **1.3** `Program.cs` — register IdentityServer services, Razor Pages, pipeline
 - [x] **1.4** Login/Logout UI — Razor Pages tại `/Account/Login`, `/Account/Logout`
 - [x] **1.5** Reference `Infrastructure.csproj` để reuse `ApplicationDbContext` + `UserEntity`
-- [ ] **1.6** Verify `.well-known/openid-configuration` endpoint hoạt động *(chưa test runtime)*
+- [x] **1.6** Verify `.well-known/openid-configuration` endpoint hoạt động *(cần HTTPS cert trusted)*
 
-### ⬜ Phase 2: API — Tích Hợp DPoP Validation
+### ✅ Phase 2: API — Tích Hợp DPoP Validation
 - [x] **2.1** DPoP module: **skip** — Duende 7.4 phát hành official package `Duende.AspNetCore.Authentication.JwtBearer 1.0.2` thay cho 11 files trong reference project
 - [x] **2.2** Cài `Duende.AspNetCore.Authentication.JwtBearer` vào `WebApi.csproj`
 - [x] **2.3** Đổi authentication scheme sang authority-based (`Authority = https://localhost:5001`, `ValidTypes=["at+jwt"]`, `MapInboundClaims=false`)
@@ -302,8 +305,8 @@ Vì thế Authorization Code flow yêu cầu:
 - [x] **4.3** Xóa cookie infrastructure đã không dùng *(đã xóa từ Phase 2, verify lại ở Phase 4)*
 - [x] **4.4** Xóa `JwtSettings` khỏi `appsettings.json`
 - [x] **4.5** Update CORS — verify không cần thêm IdentityServer origin (WebApi không gọi IDS)
-- [ ] **4.6** Redis distributed cache cho replay detection (production) **[MOVED TO PHASE 5]**
-- [ ] **4.7** Rate limiting / account lockout (deferred từ Phase 2 review I6) **[MOVED TO PHASE 5]**
+- [x] **4.6** Redis distributed cache cho replay detection (production) **[COMPLETED IN PHASE 5]**
+- [x] **4.7** Rate limiting / account lockout (deferred từ Phase 2 review I6) **[COMPLETED IN PHASE 5]**
 
 ### ✅ Phase 5: Production Hardening
 - [x] **5.1** Redis distributed cache cho DPoP replay detection (multi-instance)
@@ -390,10 +393,8 @@ Vì thế Authorization Code flow yêu cầu:
 - Profile `https`: `applicationUrl = "https://localhost:5001;http://localhost:5000"`
 - Đây là địa chỉ `Authority` mà WebApi và Frontend sẽ dùng để discover OIDC metadata
 
-#### `ecdsa384-private.pem` + `ecdsa384-public.pem`
-- ECDSA P-384 key pair sinh bằng `openssl ecparam -genkey -name secp384r1`
-- Dùng để sign DPoP proof JWT ở phía frontend (SubtleCrypto ES384)
-- ⚠️ **TODO**: Thêm `ecdsa384-private.pem` vào `.gitignore` trước khi deploy production
+> **Note:** File `.pem` đã bị xóa ở Code Review Round 1 (C3). DPoP keys là CLIENT-HELD,
+> được browser generate tự động qua oidc-client-ts `IndexedDbDPoPStore`.
 
 ### Files Thay Đổi
 
@@ -412,17 +413,19 @@ Vì thế Authorization Code flow yêu cầu:
 | Authorization Code + PKCE thay vì ROPC | Chuẩn OAuth 2.1, không để client thấy password |
 | Razor Pages cho Login UI | IdentityServer là Authorization Server, cần hosted login page |
 | Reuse ApplicationDbContext | Không duplicate user store, không cần migration |
-| DPoPAndBearer mode | Backward compatible trong giai đoạn chuyển tiếp |
-| Duende 7.0 | Phiên bản stable mới nhất, hỗ trợ DPoP native |
+| ES256/P-256 cho DPoP proof | Đồng nhất với oidc-client-ts hardcode, ~128-bit security |
+| Duende.AspNetCore.Authentication.JwtBearer 1.0.2 | Thay thế 11-file DPoP module thủ công |
+| Redis replay cache (conditional) | Dev: in-memory, Prod: Redis — không cần thay code |
 
 ---
 
 ## Lưu Ý Khi Tiếp Tục
 
-- **Phase 2**: Cần tìm Duende reference DPoP module tại https://github.com/DuendeSoftware/Samples
-- **Phase 3**: Frontend tại `../frontend/`, cần kiểm tra package manager (npm/pnpm/yarn)
-- **DPoP keys**: **Private key nằm ở browser (WebCrypto)**, KHÔNG phải server. Phase 3 sẽ generate ở frontend, lưu IndexedDB.
-- **Production signing key**: Hiện dùng `AddDeveloperSigningCredential()` (auto-generate tempkey.jwk). Production phải thay bằng `AddSigningCredential()` với key từ secret store.
+- **devenv chưa tự động start IdentityServer.** Phải chạy thủ công: `cd RetailStoreManagement/src/IdentityServer && dotnet run --launch-profile https` (port 5001). Xem section "Setup Guide" phía dưới.
+- **DPoP keys**: Private key nằm ở browser (WebCrypto non-extractable), KHÔNG phải server. oidc-client-ts tự generate ở frontend, lưu IndexedDB.
+- **Production signing key**: Dev dùng `AddDeveloperSigningCredential()` (auto-generate tempkey.jwk). Prod phải set `IdentityServer:SigningCredential:KeyPath` + `Password` trong config.
+- **Redis**: Dev tự fallback sang `AddDistributedMemoryCache()`. Prod cần cấu hình `Redis:ConnectionString` trong WebApi appsettings.
+- **IdentityServer http profile sai port**: `launchSettings.json` profile `http` dùng `localhost:5063` thay vì `localhost:5000` (M2, minor).
 
 ---
 
@@ -823,4 +826,74 @@ TDD applied to testable items (5.2, 5.3, 5.6). Configuration/operational items (
 5. Verify: `devenv db-check` kết nối thành công
 
 **Lưu ý:** Password cũ vẫn còn trong git history (commit round 1). Nếu DB chứa sensitive data, cân nhắc rotate thêm password cho DB user Neon.
+
+---
+
+## Setup Guide — Chạy DPoP End-to-End
+
+### Yêu cầu cấu hình cần hoàn thành TRƯỚC khi chạy
+
+| # | Bước | Chi tiết |
+|---|------|----------|
+| 1 | **`.env.secrets`** | Copy `.env.secrets.example` → `.env.secrets`. Điền `ConnectionStrings__DefaultConnection` (Neon PostgreSQL). Xóa các mục `JwtSettings__*` cũ (không còn dùng). |
+| 2 | **HTTPS dev cert** | `dotnet dev-certs https --trust`. IdentityServer chạy HTTPS trên port 5001, WebApi discovery gọi `https://localhost:5001/.well-known/openid-configuration` — cert phải trusted. |
+| 3 | **EF migrations** | `dotnet ef database update --project src/Infrastructure --startup-project src/WebApi`. Áp migration cho lockout fields + drop orphan table `user_refresh_tokens`. |
+| 4 | **IdentityServer connection string** | File `src/IdentityServer/appsettings.json` có `ConnectionStrings:DefaultConnection = ""`. Phải điền cùng connection string Neon. |
+
+### Cách khởi động 3 service
+
+devenv hiện chỉ start WebApi + Frontend. IdentityServer phải chạy thủ công:
+
+```bash
+# Terminal 1: IdentityServer (HTTPS port 5001)
+cd RetailStoreManagement/src/IdentityServer
+dotnet run --launch-profile https
+
+# Terminal 2: WebApi + Frontend (devenv)
+devenv up
+#   → WebApi    http://localhost:5175
+#   → Frontend  http://localhost:5173
+```
+
+Hoặc chạy tất cả bằng tay:
+
+```bash
+# Terminal 1
+cd RetailStoreManagement/src/IdentityServer && dotnet run --launch-profile https
+
+# Terminal 2
+cd RetailStoreManagement/src/WebApi && dotnet run --launch-profile http
+
+# Terminal 3
+cd frontend && yarn dev
+```
+
+### Tạo admin user lần đầu
+
+Sau khi cả 3 service đang chạy:
+
+```bash
+curl -X POST http://localhost:5175/api/setup/admin \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"<your-password>","name":"Admin","role":"Admin"}'
+```
+
+### Luồng đăng nhập
+
+1. Mở `http://localhost:5173` → redirect đến `LoginPage`
+2. Click "Đăng nhập" → redirect đến `https://localhost:5001/Account/Login`
+3. Gõ username/password → IdentityServer verify BCrypt → session cookie
+4. Redirect về `http://localhost:5173/callback?code=...`
+5. oidc-client-ts exchange code + DPoP proof → nhận DPoP-bound access_token
+6. Browser tự generate P-256 keypair (non-extractable), persist vào IndexedDB
+7. Mọi API call: `Authorization: DPoP <token>` + `DPoP: <proof>` (axios interceptor)
+
+### Các gap cần fix (devenv)
+
+| Gap | Mô tả | Ưu tiên |
+|-----|--------|---------|
+| **IdentityServer chưa trong devenv** | `devenv.nix` chỉ start WebApi + Frontend. Cần thêm process `identityServer` | High |
+| **`.env.secrets.example` outdated** | Vẫn chứa `JwtSettings__*` (đã xóa Phase 4), thiếu OIDC vars | Medium |
+| **IdentityServer http profile sai port** | `launchSettings.json` profile `http` dùng `:5063` thay vì `:5000` | Low |
+| **Frontend `.env.production` placeholder** | URL cần cập nhật khi deploy | Deploy-time |
 
