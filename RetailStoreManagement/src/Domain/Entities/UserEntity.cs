@@ -22,7 +22,9 @@ public class UserEntity : BaseEntity<int>
     [Required]
     public UserRole Role { get; set; } = UserRole.Staff;
 
+    public int FailedLoginAttempts { get; set; }
+    public DateTimeOffset? LockedUntil { get; set; }
+
     // Navigation properties
     public virtual ICollection<OrderEntity> Orders { get; set; } = [];
-    public virtual ICollection<UserRefreshToken> UserRefreshTokens { get; set; } = [];
 }

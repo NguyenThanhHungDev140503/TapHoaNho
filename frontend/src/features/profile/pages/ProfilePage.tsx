@@ -1,54 +1,36 @@
-import React, { useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import { Alert, Button, Card, Descriptions, Space, Typography, message } from 'antd';
 import { UserOutlined, LogoutOutlined } from '@ant-design/icons';
-import { useNavigate } from '@tanstack/react-router';
-import { useAuthStore } from '../../auth/store/authStore';
+import { useAuthStore, logout } from '../../auth/store/authStore';
 import { ProfileOrdersTable } from '../components/ProfileOrdersTable';
-import { API_CONFIG } from '../../../config/api.config';
-import { ENDPOINTS } from '../../../app/routes/type/routes.endpoint';
-import { authApi } from '../../auth/api/authApi';
 
 const { Title } = Typography;
 
+const ROLE_LABELS: Record<string, string> = {
+  Admin: 'Quản trị viên',
+  Staff: 'Nhân viên',
+};
+
 export const ProfilePage: React.FC = () => {
-  const navigate = useNavigate();
   const [logoutLoading, setLogoutLoading] = useState(false);
-  
-  // Sử dụng getState() để tránh re-render không cần thiết
-  const user = useAuthStore((state) => state.user);
-  const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
 
-  // Lấy role label
-  const roleLabel = useMemo(() => {
-    if (!user) return 'N/A';
-    if (user.role === API_CONFIG.USER_ROLES.ADMIN) return 'Quản trị viên';
-    if (user.role === API_CONFIG.USER_ROLES.STAFF) return 'Nhân viên';
-    return 'N/A';
-  }, [user]);
+  const user = useAuthStore((s) => s.user);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
 
-  // Handler logout
+  const roleLabel = user ? (ROLE_LABELS[user.role] ?? 'N/A') : 'N/A';
+
   const handleLogout = async () => {
     try {
       setLogoutLoading(true);
-      // Gọi API logout
-      await authApi.logout();
-      // Clear auth store
-      useAuthStore.getState().clearAuth();
-      // Hiển thị thông báo thành công
-      message.success('Đăng xuất thành công');
-      // Chuyển về trang login
-      navigate({ to: ENDPOINTS.AUTH.LOGIN as any });
-    } catch (error) {
-      // Ngay cả khi API fail, vẫn clear local state và redirect
-      useAuthStore.getState().clearAuth();
+      // Clears auth state, rotates DPoP key, redirects to IdentityServer end_session.
+      await logout();
+    } catch {
       message.warning('Đã đăng xuất khỏi ứng dụng');
-      navigate({ to: ENDPOINTS.AUTH.LOGIN as any });
     } finally {
       setLogoutLoading(false);
     }
   };
 
-  // Nếu chưa đăng nhập, hiển thị Alert
   if (!isAuthenticated || !user) {
     return (
       <div style={{ padding: '24px' }}>
@@ -62,10 +44,12 @@ export const ProfilePage: React.FC = () => {
     );
   }
 
+  // Backend user IDs are numeric; OIDC `sub` is the same value as a string.
+  const numericUserId = Number(user.sub);
+
   return (
     <div style={{ padding: '24px' }}>
       <Space direction="vertical" size="large" style={{ width: '100%' }}>
-        {/* User Info Card */}
         <Card>
           <Space align="start" size="middle">
             <UserOutlined style={{ fontSize: '48px', color: '#1890ff' }} />
@@ -80,8 +64,7 @@ export const ProfilePage: React.FC = () => {
           </Space>
         </Card>
 
-        {/* User Details */}
-        <Card 
+        <Card
           title="Thông tin tài khoản"
           extra={
             <Button
@@ -96,27 +79,26 @@ export const ProfilePage: React.FC = () => {
           }
         >
           <Descriptions column={1} bordered>
-            <Descriptions.Item label="Tên đăng nhập">
-              {user.username}
-            </Descriptions.Item>
-            <Descriptions.Item label="Họ và tên">
-              {user.fullName}
-            </Descriptions.Item>
-            <Descriptions.Item label="Vai trò">
-              {roleLabel}
-            </Descriptions.Item>
-            <Descriptions.Item label="ID người dùng">
-              {user.id}
-            </Descriptions.Item>
+            <Descriptions.Item label="Tên đăng nhập">{user.username}</Descriptions.Item>
+            <Descriptions.Item label="Họ và tên">{user.fullName}</Descriptions.Item>
+            <Descriptions.Item label="Vai trò">{roleLabel}</Descriptions.Item>
+            <Descriptions.Item label="ID người dùng">{user.sub}</Descriptions.Item>
           </Descriptions>
         </Card>
 
-        {/* Orders Table */}
-        <Card title="Đơn hàng đã tạo">
-          <ProfileOrdersTable userId={user.id} />
-        </Card>
+        {Number.isFinite(numericUserId) ? (
+          <Card title="Đơn hàng đã tạo">
+            <ProfileOrdersTable userId={numericUserId} />
+          </Card>
+        ) : (
+          <Alert
+            type="info"
+            showIcon
+            message="Đơn hàng không khả dụng"
+            description="Tài khoản này không có ID dạng số nên không thể tải lịch sử đơn hàng."
+          />
+        )}
       </Space>
     </div>
   );
 };
-

@@ -1,300 +1,242 @@
-import axios from 'axios';
-import type { AxiosError, AxiosInstance, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
-import type { LoginResponse } from "../../features/auth/types/api.ts";
-import { ENDPOINTS } from "../../app/routes/type/routes.endpoint.ts";
-import { API_CONFIG } from "../../config/api.config.ts";
-import type { ApiResponse } from './types/api.types.ts';
-import { useAuthStore } from "../../features/auth/store/authStore.ts";
+/**
+ * Axios client — DPoP-aware HTTP client
+ *
+ * Request flow (per RFC 9449):
+ *   1. Resolve target URL. Skip DPoP entirely if it doesn't point to the
+ *      configured API origin (defense against accidentally leaking the
+ *      access token + a bound proof to a third-party host).
+ *   2. Retrieve the current access token + DPoP keypair (both managed by
+ *      oidc-client-ts in IndexedDB / sessionStorage).
+ *   3. Build a DPoP proof JWT and attach:
+ *        Authorization: DPoP <access_token>
+ *        DPoP: <proof_jwt>
+ *
+ * 401 with use_dpop_nonce:
+ *   Server replies WWW-Authenticate: DPoP error="use_dpop_nonce"
+ *                  DPoP-Nonce: <server_nonce>
+ *   The interceptor retries exactly once with the nonce in the proof.
+ *
+ * Token refresh:
+ *   On a plain 401 (no nonce challenge), call silentRenew() which exchanges
+ *   the refresh token for a new DPoP-bound access token (same keypair).
+ *   Then retry the original request.
+ */
 
-// Token utils không còn dùng do BE đọc cookie trực tiếp
+import axios from 'axios';
+import type {
+  AxiosError,
+  AxiosInstance,
+  AxiosResponse,
+  InternalAxiosRequestConfig,
+} from 'axios';
+import type { ApiResponse } from './types/api.types';
+import { useAuthStore } from '../../features/auth/store/authStore';
+import { getUser, silentRenew, getDPoPKeyPair } from '../oidc/userManager';
+import { buildDPoPProof } from '../oidc/dpop';
+import { ENDPOINTS } from '../../app/routes/type/routes.endpoint';
+
+// Keep tokenUtils shim so legacy callers don't break at import time.
 export const tokenUtils = {
   getToken: (): string | null => null,
   getRefreshToken: (): string | null => null,
-  setTokens: (): void => { /* no-op */ },
-  clearAllTokens: (): void => { /* no-op */ }
+  setTokens: (): void => { /* tokens live in oidc-client-ts session storage */ },
+  clearAllTokens: (): void => { /* no-op */ },
 };
 
-// Tạo Axios instance với cấu hình đầy đủ
-const axiosClient: AxiosInstance = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:5175',
-  timeout: 10000, // 10 giây timeout
-  headers: {
-    'Content-Type': 'application/json',
-  },
-  withCredentials: true, // Quan trọng: Cho phép gửi cookies với mọi request
-});
+// ─────────────────────────────────────────────────────────────────────────────
+// Config
+// ─────────────────────────────────────────────────────────────────────────────
 
-// Biến để theo dõi việc refresh token đang diễn ra
+const API_BASE_URL = (() => {
+  const value = import.meta.env.VITE_API_BASE_URL as string | undefined;
+  if (value) return value;
+  if (import.meta.env.PROD) {
+    throw new Error(
+      '[axios] Missing required environment variable VITE_API_BASE_URL in production build.',
+    );
+  }
+  return 'http://localhost:5175';
+})();
+
+/**
+ * Origin that should receive Authorization + DPoP headers. Anything else
+ * (third-party APIs, CDN URLs accidentally fed to axiosClient) is sent
+ * unauthenticated.
+ */
+const API_ORIGIN = new URL(API_BASE_URL).origin;
+
+const axiosClient: AxiosInstance = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: 10000,
+  headers: { 'Content-Type': 'application/json' },
+  // DPoP uses Authorization header — no cookies needed.
+  withCredentials: false,
+});
+// WARNING: requests whose resolved origin does NOT match API_ORIGIN are
+// sent WITHOUT Authorization / DPoP headers (see request interceptor below).
+// This is deliberate — it prevents the access token from leaking to a
+// third-party host if `baseURL` is accidentally overridden per-request.
+// If you legitimately need an authenticated call to a different origin,
+// build a separate axios instance for that host.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────────────────────────────────────
+
 let isRefreshing = false;
-let isRedirecting = false; // Flag để theo dõi việc đang redirect đến login
-let failedQueue: Array<{
-  resolve: (value?: string | null) => void;
-  reject: (reason?: unknown) => void;
+let pendingQueue: Array<{
+  resolve: (token: string) => void;
+  reject: (err: unknown) => void;
 }> = [];
 
-// Kiểm tra xem có đang ở trang login không
-// Chỉ check chính xác trang login, không phải tất cả các trang trong /auth/*
-const isLoginPage = (): boolean => { // Todo: Nên clean logic
-  return window.location.pathname === ENDPOINTS.AUTH.LOGIN;
-};
+/** Server-issued DPoP nonce (from DPoP-Nonce response header). */
+let dpopNonce: string | undefined;
 
-// Kiểm tra xem request có phải là auth endpoint không (login, register, refresh, logout, etc.)
-const isAuthEndpoint = (url: string | undefined): boolean => {
-  if (!url) return false;
-  const authEndpoints = [
-    API_CONFIG.ENDPOINTS.AUTH.LOGIN,
-    API_CONFIG.ENDPOINTS.AUTH.REFRESH,
-    API_CONFIG.ENDPOINTS.AUTH.LOGOUT,
-    API_CONFIG.ENDPOINTS.AUTH.SETUP_ADMIN,
-  ];
-  return authEndpoints.some(endpoint => url.includes(endpoint));
-};
+function drainQueue(err: unknown, token?: string) {
+  pendingQueue.forEach(({ resolve, reject }) =>
+    err ? reject(err) : resolve(token!),
+  );
+  pendingQueue = [];
+}
 
-// Xử lý queue khi refresh token hoàn thành
-const processQueue = (error: unknown, token: string | null = null) => {
-  failedQueue.forEach(({ resolve, reject }) => {
-    if (error) {
-      reject(error);
-    } else {
-      resolve(token);
-    }
-  });
+// ─────────────────────────────────────────────────────────────────────────────
+// Request interceptor — attach DPoP proof + Authorization for API origin only
+// ─────────────────────────────────────────────────────────────────────────────
 
-  failedQueue = [];
-};
-
-// Request interceptor - Đảm bảo withCredentials luôn được set
 axiosClient.interceptors.request.use(
   async (config: InternalAxiosRequestConfig) => {
-    // Nếu đang redirect, chặn tất cả request (trừ auth endpoints)
-    if (isRedirecting) {
-      // Cho phép auth endpoints ngay cả khi đang redirect
-      if (isAuthEndpoint(config.url)) {
-        config.withCredentials = true;
-        return config;
-      }
-      // Tạo một error object với flag để các component có thể handle
-      const error = new Error('Đang chuyển hướng đến trang đăng nhập') as Error & { 
-        isRedirecting?: boolean;
-        skipLogging?: boolean;
-      };
-      error.isRedirecting = true;
-      error.skipLogging = false; // Tắt skipLogging để xem lỗi chi tiết
-      return Promise.reject(error);
-    }
+    const url = buildFullUrl(config);
 
-    // Nếu đang ở trang login, chỉ cho phép auth endpoints
-    // Chặn các request khác để tránh vòng lặp redirect
-    if (isLoginPage()) {
-      if (isAuthEndpoint(config.url)) {
-        // Cho phép auth endpoints (login, register, refresh, etc.)
-        config.withCredentials = true;
-        return config;
-      }
-      // Chặn các request khác khi đang ở trang login
-      const error = new Error('Đang ở trang đăng nhập, chỉ cho phép các request xác thực') as Error & { 
-        isRedirecting?: boolean;
-        skipLogging?: boolean;
-      };
-      error.skipLogging = false; // Tắt skipLogging để xem lỗi chi tiết
-      return Promise.reject(error);
+    // Same-origin scoping: never attach access tokens to non-API hosts.
+    let targetOrigin: string;
+    try {
+      targetOrigin = new URL(url).origin;
+    } catch {
+      return config;
     }
+    if (targetOrigin !== API_ORIGIN) return config;
 
-    // Đảm bảo withCredentials luôn được set để gửi cookies
-    config.withCredentials = true;
+    const oidcUser = await getUser();
+    const accessToken = oidcUser?.access_token;
+    if (!accessToken) return config;
+
+    const keyPair = await getDPoPKeyPair();
+    if (!keyPair) return config;
+
+    const proof = await buildDPoPProof(keyPair, {
+      htm: (config.method ?? 'GET').toUpperCase(),
+      htu: url,
+      accessToken,
+      nonce: dpopNonce,
+    });
+
+    config.headers.set('Authorization', `DPoP ${accessToken}`);
+    config.headers.set('DPoP', proof);
     return config;
   },
-  (error: unknown) => {
-    return Promise.reject(error);
-  }
+  (err) => Promise.reject(err),
 );
 
-// Response interceptor - Xử lý response và error handling
+// ─────────────────────────────────────────────────────────────────────────────
+// Response interceptor
+// ─────────────────────────────────────────────────────────────────────────────
+
 axiosClient.interceptors.response.use(
   (response: AxiosResponse) => {
-    // Trả về data từ ApiResponse structure
+    const nonce = response.headers['dpop-nonce'];
+    if (nonce) dpopNonce = nonce;
     return response.data as never;
   },
   async (error: AxiosError<ApiResponse>) => {
-    const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean };
+    const original = error.config as InternalAxiosRequestConfig & {
+      _retry?: boolean;
+      _nonceRetry?: boolean;
+    };
+    if (!original) return Promise.reject(error);
 
-    // Bỏ qua xử lý 401 nếu đang redirect hoặc đang ở trang login
-    // để tránh vòng lặp redirect vô hạn
-    if (isRedirecting || isLoginPage()) {
-      return Promise.reject(error);
+    // ── DPoP-Nonce challenge ─────────────────────────────────────────────────
+    const wwwAuth = error.response?.headers['www-authenticate'] as string | undefined;
+    const serverNonce = error.response?.headers['dpop-nonce'] as string | undefined;
+
+    if (
+      error.response?.status === 401 &&
+      wwwAuth?.includes('use_dpop_nonce') &&
+      serverNonce &&
+      !original._nonceRetry
+    ) {
+      dpopNonce = serverNonce;
+      original._nonceRetry = true;
+      return axiosClient(original);
     }
 
-    // Xử lý lỗi 401 (Unauthorized) - Token hết hạn
-    if (error.response?.status === 401 && !originalRequest._retry) {
-      // Bỏ qua refresh token nếu request là đến endpoint refresh token
-      // để tránh vòng lặp
-      if (originalRequest.url?.includes(API_CONFIG.ENDPOINTS.AUTH.REFRESH)) {
-        return Promise.reject(error);
-      }
-
-      console.log('🔐 Access token hết hạn, bắt đầu refresh token...');
+    // ── Token expired (silent renew) ──────────────────────────────────────────
+    if (error.response?.status === 401 && !original._retry) {
       if (isRefreshing) {
-        // Nếu đang refresh token, thêm request vào queue
         return new Promise((resolve, reject) => {
-          failedQueue.push({ resolve, reject });
-        }).then(() => {
-          // Kiểm tra lại trước khi retry
-          if (isRedirecting || isLoginPage()) {
-            return Promise.reject(new Error('Đang chuyển hướng đến trang đăng nhập'));
-          }
-          originalRequest.withCredentials = true;
-          // Reset _retry flag để có thể retry lại nếu cần
-          originalRequest._retry = false;
-          // Request sẽ được retry với cookies mới
-          return axiosClient(originalRequest);
-        }).catch(err => {
-          return Promise.reject(err);
+          pendingQueue.push({ resolve, reject });
+        }).then((token) => {
+          original._retry = true;
+          original.headers.set('Authorization', `DPoP ${token}`);
+          return axiosClient(original);
         });
       }
 
-      originalRequest._retry = true;
+      original._retry = true;
       isRefreshing = true;
 
-      // Clear auth state trước khi refresh token
-      useAuthStore.getState().clearAuth();
-
       try {
-        // Backend đọc refresh token từ HttpOnly cookie
-        const response = await axiosClient.post<ApiResponse<LoginResponse>>(
-          API_CONFIG.ENDPOINTS.AUTH.REFRESH,
-          {}
-        ) as unknown as ApiResponse<LoginResponse>;
+        const renewed = await silentRenew();
+        if (!renewed) throw new Error('Silent renew returned null');
 
-        if (!response.isError && response.data) {
-          // Tokens mới đã được set vào cookies bởi backend
-
-          console.log('✅ Refresh token thành công, cookies mới đã được set');
-
-          // Đợi một chút để đảm bảo cookies được set trong browser
-          await new Promise(resolve => setTimeout(resolve, 100));
-
-          processQueue(null, null);
-
-          // Kiểm tra lại trước khi retry
-          if (isRedirecting || isLoginPage()) {
-            return Promise.reject(new Error('Đang chuyển hướng đến trang đăng nhập'));
-          }
-
-          // Retry request gốc - cookies mới sẽ tự động được gửi
-          // Đảm bảo withCredentials được set
-          originalRequest.withCredentials = true;
-          // Reset _retry flag để có thể retry lại nếu cần
-          originalRequest._retry = false;
-          console.log('🔄 Retrying original request với cookies mới...', {
-            method: originalRequest.method,
-            url: originalRequest.url,
-            hasData: !!originalRequest.data,
-            hasParams: !!originalRequest.params
-          });
-          return axiosClient(originalRequest);
-        } else {
-          console.error('❌ Refresh token failed:', response.message);
-          throw new Error(response.message || 'Refresh token failed');
-        }
-      } catch (refreshError) {
-        console.error('❌ Refresh token error:', refreshError);
-        
-        // Set flag redirecting trước khi redirect
-        isRedirecting = true;
-        
-        // Reject tất cả các request trong queue
-        processQueue(new Error('Refresh token thất bại, đang chuyển hướng đến trang đăng nhập'), null);
-
-        // Redirect về trang login
-        console.log('🔄 Redirecting to login page...');
+        useAuthStore.getState().setOidcUser(renewed);
+        drainQueue(null, renewed.access_token);
+        return axiosClient(original);
+      } catch (renewErr) {
+        drainQueue(renewErr);
+        useAuthStore.getState().clearAuth();
         window.location.href = ENDPOINTS.AUTH.LOGIN;
-        return Promise.reject(refreshError);
+        return Promise.reject(renewErr);
       } finally {
         isRefreshing = false;
       }
     }
 
-    // Xử lý các lỗi khác
+    // ── Error normalisation ───────────────────────────────────────────────────
     if (error.response?.data) {
-      // Backend có thể trả về ApiResponse hoặc ProblemDetails (application/problem+json) hoặc validation errors
-      const responseData = error.response.data as any;
-
-      // Log error chi tiết (luôn log để debug, nhưng đánh dấu nếu có skipLogging)
-      const errorWithSkipLogging = error as unknown as { skipLogging?: boolean };
-      const logPrefix = errorWithSkipLogging.skipLogging ? '⚠️ [Axios] API Error (skipLogging=true):' : '❌ [Axios] API Error:';
-      console.error(logPrefix, {
-        url: originalRequest?.url,
-        method: originalRequest?.method,
-        status: error.response?.status,
-        statusText: error.response?.statusText,
-        data: responseData,
-        headers: error.response?.headers,
-        skipLogging: errorWithSkipLogging.skipLogging || false,
-      });
-
-      // Lấy message từ nhiều nguồn có thể
-      let errorMessage = 'Có lỗi xảy ra';
-
-      // Ưu tiên 1: ApiResponse format từ backend (isError === true)
-      if (responseData.isError === true && responseData.message) {
-        errorMessage = responseData.message;
+      const d = error.response.data as Record<string, unknown>;
+      let message = 'Có lỗi xảy ra';
+      if (d['isError'] === true && d['message']) {
+        message = d['message'] as string;
+      } else if (typeof d['message'] === 'string') {
+        message = d['message'];
+      } else if (typeof d['title'] === 'string') {
+        message = d['detail'] ? `${d['title']}: ${d['detail']}` : (d['title'] as string);
+      } else if (typeof d['detail'] === 'string') {
+        message = d['detail'];
       }
-      // Ưu tiên 2: ApiResponse format nhưng không có isError flag (fallback)
-      else if (responseData.message && typeof responseData.message === 'string') {
-        errorMessage = responseData.message;
-      }
-      // Ưu tiên 3: ProblemDetails format (application/problem+json)
-      else if (responseData.title) {
-        errorMessage = responseData.title;
-        if (responseData.detail) {
-          errorMessage += `: ${responseData.detail}`;
-        }
-      }
-      // Ưu tiên 4: Detail không có title
-      else if (responseData.detail) {
-        errorMessage = responseData.detail;
-      }
-      // Ưu tiên 5: Validation errors (FluentValidation format)
-      else if (responseData.errors) {
-        const validationMessages = Object.values(responseData.errors as Record<string, string[]>)
-          .flat()
-          .join('; ');
-        if (validationMessages) {
-          errorMessage = validationMessages;
-        }
-      }
-      // Ưu tiên 6: String response
-      else if (typeof responseData === 'string') {
-        errorMessage = responseData;
-      }
-
-      // Trả về error message từ API response
-      return Promise.reject({
-        ...error,
-        message: errorMessage,
-        data: responseData,
-        originalError: error, // Giữ lại error gốc để debug
-      });
+      return Promise.reject({ ...error, message, data: d });
     }
 
-    // Xử lý lỗi network hoặc timeout
     if (error.code === 'ECONNABORTED') {
-      return Promise.reject({
-        ...error,
-        message: 'Yêu cầu bị timeout. Vui lòng thử lại.'
-      });
+      return Promise.reject({ ...error, message: 'Yêu cầu bị timeout. Vui lòng thử lại.' });
     }
-
     if (!error.response) {
-      return Promise.reject({
-        ...error,
-        message: 'Không thể kết nối đến server. Vui lòng kiểm tra kết nối mạng.'
-      });
+      return Promise.reject({ ...error, message: 'Không thể kết nối đến server.' });
     }
 
     return Promise.reject(error);
-  }
+  },
 );
 
 export default axiosClient;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+function buildFullUrl(config: InternalAxiosRequestConfig): string {
+  const path = config.url ?? '';
+  if (/^https?:\/\//i.test(path)) return path;
+  const base = (config.baseURL ?? API_BASE_URL).replace(/\/$/, '');
+  return `${base}${path.startsWith('/') ? '' : '/'}${path}`;
+}

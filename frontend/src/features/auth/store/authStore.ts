@@ -1,121 +1,124 @@
 import { create } from 'zustand';
-import { devtools, persist } from 'zustand/middleware';
+import { devtools } from 'zustand/middleware';
+import type { User } from 'oidc-client-ts';
+import { signoutRedirect, getUser, clearDPoPKeyPair } from '../../../lib/oidc/userManager';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────────────────
 
-// Types cho Auth Store
-interface User {
-  id: number;
+/**
+ * User shape derived from IdentityServer access-token claims (at+jwt).
+ * Role values come from the JwtClaimTypes.Role claim — always one of:
+ *   "Admin" | "Staff"
+ *
+ * Refresh tokens are intentionally NOT stored here. They live only in the
+ * oidc-client-ts session storage; mirroring them into zustand state would
+ * leak them into devtools and any persisted middleware.
+ */
+interface OidcUser {
+  sub: string;
   username: string;
   fullName: string;
-  role: number;
+  role: string;
+  accessToken: string;
 }
 
 interface AuthState {
-  // State
-  user: User | null;
+  user: OidcUser | null;
   isAuthenticated: boolean;
+  /** True until initFromSession() has completed at least once. */
+  isLoading: boolean;
 
-  // Actions
-  setAuth: (data: { user: User }) => void;
+  setOidcUser: (oidcUser: User) => void;
   clearAuth: () => void;
-  checkAuth: () => void;
+  initFromSession: () => Promise<void>;
 
-  // Utility methods
-  hasRole: (requiredRole: number) => boolean;
   isAdmin: () => boolean;
   isStaff: () => boolean;
+  hasRole: (role: string) => boolean;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Store
+// ─────────────────────────────────────────────────────────────────────────────
 
 export const useAuthStore = create<AuthState>()(
   devtools(
-    persist(
-      (set, get) => ({
-        // Initial state
-        user: null,
-        isAuthenticated: false,
+    (set, get) => ({
+      user: null,
+      isAuthenticated: false,
+      isLoading: true,
 
-        // Actions
-        setAuth: (data: { user: User }) => {
-          set({
-            user: data.user,
-            isAuthenticated: true,
-          });
-        },
+      setOidcUser: (oidcUser: User) => {
+        const profile = oidcUser.profile;
+        set({
+          user: {
+            sub: profile.sub,
+            username: (profile['preferred_username'] as string) ?? profile.sub,
+            fullName: (profile['name'] as string) ?? '',
+            role: (profile['role'] as string) ?? '',
+            accessToken: oidcUser.access_token,
+          },
+          isAuthenticated: true,
+          isLoading: false,
+        });
+      },
 
-        clearAuth: () => {
-          set({
-            user: null,
-            isAuthenticated: false,
-          });
-        },
+      clearAuth: () => {
+        set({ user: null, isAuthenticated: false, isLoading: false });
+      },
 
-        checkAuth: () => {
-          // Với httpOnly cookies, không thể đọc token từ frontend
-          // Chỉ kiểm tra xem có user trong store không
-          const { user } = get();
-          if (!user) {
-            get().clearAuth();
+      /** Restore session from oidc-client-ts storage on app bootstrap. */
+      initFromSession: async () => {
+        try {
+          const oidcUser = await getUser();
+          if (oidcUser && !oidcUser.expired) {
+            get().setOidcUser(oidcUser);
+          } else {
+            set({ user: null, isAuthenticated: false, isLoading: false });
           }
-        },
-
-        // Utility methods
-        hasRole: (requiredRole: number) => {
-          const { user } = get();
-          if (!user) return false;
-
-          // Admin có tất cả quyền
-          if (user.role === 0) return true;
-
-          return user.role === requiredRole;
-        },
-
-        isAdmin: () => {
-          const { user } = get();
-          return user?.role === 0;
-        },
-
-        isStaff: () => {
-          const { user } = get();
-          // Chỉ return true nếu user thực sự là Staff (role === 1), không phải Admin
-          return user?.role === 1;
+        } catch {
+          set({ user: null, isAuthenticated: false, isLoading: false });
+        } finally {
+          // Defensive: guarantee isLoading flips false even if a future
+          // change to setOidcUser forgets to clear it. Otherwise the app
+          // would hang on the loading splash forever.
+          if (get().isLoading) set({ isLoading: false });
         }
-      }),
-      {
-        name: 'auth-store',
-        partialize: (state) => {
-          return {
-            user: state.user,
-            isAuthenticated: state.isAuthenticated
-          };
-        },
-      }
-    ),
-    {
-      name: 'auth-store'
-    }
+      },
+
+      isAdmin: () => get().user?.role === 'Admin',
+      isStaff: () => get().user?.role === 'Staff',
+      hasRole: (role: string) => {
+        const { user } = get();
+        if (!user) return false;
+        if (user.role === 'Admin') return true; // Admin implicitly satisfies any role
+        return user.role === role;
+      },
+    }),
+    { name: 'auth-store' }
   )
 );
 
-// Selector hooks để tối ưu re-renders
-// Hook này subscribe vào state và tự động re-render component khi state thay đổi
-// Sử dụng cho các component cần hiển thị user info và tự động cập nhật
-export const useAuth = () => useAuthStore((state) => ({
-  user: state.user,
-  isAuthenticated: state.isAuthenticated,
-}));
+// ─────────────────────────────────────────────────────────────────────────────
+// Logout — exported for components
+// ─────────────────────────────────────────────────────────────────────────────
 
-// Lưu ý: Actions và Permissions nên dùng getState() để tránh re-render không cần thiết
-// 
-// Actions (không cần subscribe):
-//   useAuthStore.getState().setAuth({ user })
-//   useAuthStore.getState().clearAuth()
-//   useAuthStore.getState().checkAuth()
-//
-// Permissions (không cần subscribe):
-//   useAuthStore.getState().isAdmin()
-//   useAuthStore.getState().isStaff()
-//   useAuthStore.getState().hasRole(role)
-//
-// Nếu cần subscribe permissions (hiếm khi cần):
-//   const isAdmin = useAuthStore((state) => state.isAdmin());
-//   const hasRole = useAuthStore((state) => state.hasRole(role));
+export async function logout(): Promise<void> {
+  // Clear in-memory state first so any guard that fires during the redirect
+  // sees an unauthenticated session.
+  useAuthStore.getState().clearAuth();
+  // Drop the persisted DPoP keypair — next session generates a fresh one.
+  await clearDPoPKeyPair();
+  // Hand control to IdentityServer's end_session endpoint.
+  await signoutRedirect();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Selector hooks (individual selectors avoid extra re-renders)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const useUser = () => useAuthStore((s) => s.user);
+export const useIsAuthenticated = () => useAuthStore((s) => s.isAuthenticated);
+export const useIsAuthLoading = () => useAuthStore((s) => s.isLoading);

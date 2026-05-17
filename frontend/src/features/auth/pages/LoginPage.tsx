@@ -1,24 +1,64 @@
-import { Card } from "antd";
-import React from 'react';
-import LoginForm from "../components/LoginForm";
+/**
+ * Login Page
+ *
+ * Redirects to IdentityServer /connect/authorize (Authorization Code + PKCE + DPoP).
+ * No credentials are sent to the API — login happens entirely at IdentityServer.
+ */
+
+import { Card, Spin } from "antd";
+import React, { useEffect } from 'react';
+import { useNavigate } from '@tanstack/react-router';
+import { signinRedirect } from '../../../lib/oidc/userManager';
+import { useIsAuthenticated } from '../store/authStore';
+
+/**
+ * Validates returnTo URL to prevent open redirect attacks.
+ * Allows: relative paths (/dashboard), same-origin URLs (https://localhost:5173/orders)
+ * Blocks: absolute URLs to external domains (https://evil.com), protocol-relative (//evil.com)
+ */
+function isAllowedReturnTo(returnTo: string | null): boolean {
+  if (!returnTo) return false;
+  // Block protocol-relative URLs
+  if (returnTo.startsWith('//')) return false;
+  // Allow relative paths
+  if (returnTo.startsWith('/')) return true;
+  // Allow same-origin absolute URLs
+  try {
+    const url = new URL(returnTo);
+    return url.origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
 
 export const LoginPage: React.FC = () => {
+  const isAuthenticated = useIsAuthenticated();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      void navigate({ to: '/' });
+      return;
+    }
+
+    // Save intended destination so callback page can redirect back
+    // Only allow relative paths or same-origin URLs to prevent open redirect
+    const returnTo = new URLSearchParams(window.location.search).get('returnTo');
+    if (isAllowedReturnTo(returnTo)) {
+      sessionStorage.setItem('oidc_return_to', returnTo);
+    }
+
+    // Start OIDC Authorization Code + PKCE + DPoP flow
+    signinRedirect().catch((err) => {
+      console.error('[OIDC] signinRedirect failed:', err);
+    });
+  }, [isAuthenticated, navigate]);
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 p-6">
-      <Card className="w-full max-w-md rounded-2xl shadow-xl p-6">
-        <div className="text-center mb-6">
-          <h1 className="text-gray-500 text-sm">Đăng nhập vào tài khoản của bạn</h1>
-        </div>
-
-        <LoginForm />
-
-        <p className="text-center text-sm text-gray-500 mt-6">
-          Chưa có tài khoản?{" "}
-          <a href="/auth/register" className="text-indigo-600 hover:underline">
-            Đăng ký
-          </a>
-        </p>
+      <Card className="w-full max-w-md rounded-2xl shadow-xl p-6 text-center">
+        <Spin size="large" />
+        <p className="mt-4 text-gray-500">Đang chuyển hướng đến trang đăng nhập…</p>
       </Card>
     </div>
   );

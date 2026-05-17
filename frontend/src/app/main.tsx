@@ -7,17 +7,26 @@ import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import 'antd/dist/reset.css';
 import { router } from './routes/routeTree'; // Import the router from routeTree
 import { queryClient } from '../lib/query/queryClient';
+import { useAuthStore } from '../features/auth/store/authStore';
 
-// Render the app
-const rootElement = document.getElementById('root')!
-if (!rootElement.innerHTML) {
-  const root = ReactDOM.createRoot(rootElement)
-  root.render(
+// Restore OIDC session BEFORE rendering. Otherwise route guards (which read
+// isAuthenticated synchronously) on protected URLs would bounce hard-reload
+// users to /auth/login while the session is still being restored from
+// oidc-client-ts storage.
+async function bootstrap() {
+  await useAuthStore.getState().initFromSession();
+
+  const rootElement = document.getElementById('root')!;
+  if (rootElement.innerHTML) return;
+
+  ReactDOM.createRoot(rootElement).render(
     <StrictMode>
       <QueryClientProvider client={queryClient}>
         <RouterProvider router={router} />
         {import.meta.env.DEV && <ReactQueryDevtools initialIsOpen={false} />}
       </QueryClientProvider>
     </StrictMode>,
-  )
+  );
 }
+
+void bootstrap();

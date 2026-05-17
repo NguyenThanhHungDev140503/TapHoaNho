@@ -51,8 +51,9 @@
   # PROCESSES - Background services (devenv up)
   # ============================================
   processes = {
-    frontend.exec = "${pkgs.bash}/bin/bash -c 'cd frontend && yarn dev'";
+    identity.exec = "${pkgs.bash}/bin/bash -c 'cd RetailStoreManagement/src/IdentityServer && dotnet run --launch-profile https'";
     backend.exec = "${pkgs.bash}/bin/bash -c 'cd RetailStoreManagement/src/WebApi && dotnet watch run --launch-profile http'";
+    frontend.exec = "${pkgs.bash}/bin/bash -c 'cd frontend && yarn dev'";
   };
 
   # ============================================
@@ -132,7 +133,7 @@
     echo ""
     
     echo "🔧 Commands:"
-    echo "  • devenv up       - Start frontend + backend"
+    echo "  • devenv up       - Start all (IdentityServer + WebApi + Frontend)"
     echo "  • setup           - Install dependencies"
     echo "  • build-all       - Build all"
     echo "  • build-frontend  - Build frontend"
